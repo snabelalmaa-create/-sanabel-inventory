@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>إصلاح استيراد تطبيق جرد سنابل</title>
+<style>
+body{font-family:Tahoma,Arial,sans-serif;background:#07101f;color:#fff;margin:0;padding:18px;font-weight:700}
+.card{max-width:760px;margin:auto;background:#111a2e;border:1px solid #2b3858;border-radius:22px;padding:18px;box-shadow:0 20px 60px #0006}
+h1{font-size:22px;color:#f4c542;margin:0 0 12px}.note{line-height:1.9;color:#dbeafe;background:#0b1326;border:1px solid #2b3858;border-radius:16px;padding:12px;margin:12px 0}
+input,button{font-family:inherit;font-size:17px;font-weight:700;border-radius:14px;padding:13px;width:100%;box-sizing:border-box}input{background:#0b1326;color:#fff;border:1px solid #2b3858}button{background:#f4c542;color:#111;border:0;cursor:pointer;margin-top:10px}.ok{color:#bbf7d0;background:#052e16;border:1px solid #22c55e;border-radius:14px;padding:12px;margin-top:12px;display:none}.bad{color:#fecaca;background:#450a0a;border:1px solid #ef4444;border-radius:14px;padding:12px;margin-top:12px;display:none}.small{color:#a8b3c7;font-size:13px;line-height:1.8}
+</style>
+</head>
+<body>
+<div class="card">
+<h1>إصلاح مشكلة عدم قبول ملف الأصناف الثاني</h1>
+<div class="note">
+اختر ملف <b>index.html</b> الحالي، وسيتم تنزيل نسخة معدلة تلقائياً باسم <b>index.html</b>.
+<br>الإصلاح يضيف استيراد ذكي يختار ورقة البيانات الصحيحة بدل ورقة الملاحظات، ويلغي تعارض الملف الرئيسي مع ملف الوحدات الأخرى، ويصفر خانة اختيار الملف بعد كل استيراد.
+</div>
+<input id="file" type="file" accept=".html,.htm,text/html">
+<button onclick="patchNow()">تعديل الاندكس وتنزيل النسخة</button>
+<div id="ok" class="ok"></div>
+<div id="bad" class="bad"></div>
+<p class="small">بعد تنزيل الملف: ارفعه في GitHub مكان index.html القديم ثم افتح الرابط من نافذة خاصة أو امسح الكاش.</p>
+</div>
+<script>
+const FIX_CODE = String.raw`
+/* ===== إصلاح سنابل: استيراد ملفين بدون تعارض + اختيار ورقة البيانات الصحيحة ===== */
+function sanabelParseNumber(v){
+  if(v===undefined||v===null||v==='') return 0;
+  let s=String(v).trim().replace(/,/g,'').replace(/[٠-٩]/g,d=>'٠١٢٣٤٥٦٧٨٩'.indexOf(d)).replace(/[۰-۹]/g,d=>'۰۱۲۳۴۵۶۷۸۹'.indexOf(d));
+  const n=Number(s); return Number.isFinite(n)?n:0;
+}
+function normalizeBarcodeValue(v){
+  let code=String(v??'').trim();
+  code=code.replace(/[٠-٩]/g,d=>'٠١٢٣٤٥٦٧٨٩'.indexOf(d)).replace(/[۰-۹]/g,d=>'۰۱۲۳۴۵۶۷۸۹'.indexOf(d));
+  if(/^[0-9]+\.0+$/.test(code)) code=code.replace(/\.0+$/,'');
+  return code;
+}
+function sanabelPick(row, keys){
+  for(const k of keys){ if(row[k]!==undefined && row[k]!==null && String(row[k]).trim()!=='') return row[k]; }
+  const norm = s => String(s||'').replace(/[\s_\-\/]+/g,'').toLowerCase();
+  const map={}; Object.keys(row||{}).forEach(k=>map[norm(k)]=k);
+  for(const k of keys){ const hit=map[norm(k)]; if(hit && row[hit]!==undefined && String(row[hit]).trim()!=='') return row[hit]; }
+  return '';
+}
+function sanabelRowsFromWorkbook(wb){
+  const keys = window.itemKeys || {barcode:['باركود','الباركود','barcode','Barcode','BARCODE','كود','الكود'],name:['اسم الصنف','الصنف','الاسم','item','name','Item Name','description','الوصف'],qty:['الكمية','كمية النظام','الرصيد','qty','quantity','stock','balance'],unit:['الوحدة','وحدة','unit','uom','Unit'],cost:['التكلفة','تكلفة','تكلفة الصنف','سعر التكلفة','cost','Cost','unit cost','Unit Cost','price','Price']};
+  let best={rows:[],score:-1,name:''};
+  (wb.SheetNames||[]).forEach(sheetName=>{
+    const ws=wb.Sheets[sheetName];
+    const rows=XLSX.utils.sheet_to_json(ws,{defval:'',raw:false});
+    let score=0;
+    rows.slice(0,80).forEach(r=>{ const b=normalizeBarcodeValue(sanabelPick(r,keys.barcode)); if(/^\d{3,}$/.test(b)) score++; });
+    if(rows.length>best.rows.length && score===best.score) best={rows,score,name:sheetName};
+    if(score>best.score) best={rows,score,name:sheetName};
+  });
+  return best;
+}
+function importExcel(e){ importExcelMain(e); }
+function importExcelMain(e){ importExcelToList(e,'main'); }
+function importExcelOther(e){ importExcelToList(e,'other'); }
+function importExcelToList(e,type){
+  const input=e && e.target ? e.target : null;
+  const file=input && input.files ? input.files[0] : null;
+  if(!file) return;
+  const listName=type==='other'?'الأصناف بالوحدات الأخرى':'الأصناف بالوحدة الرئيسية';
+  const reader=new FileReader();
+  reader.onload=async ev=>{
+    try{
+      const buffer=ev.target.result;
+      const wb=XLSX.read(buffer,{type:'array',cellDates:false,raw:false});
+      const chosen=sanabelRowsFromWorkbook(wb);
+      const rows=chosen.rows||[];
+      const keys = window.itemKeys || {barcode:['باركود','الباركود','barcode','Barcode','BARCODE','كود','الكود'],name:['اسم الصنف','الصنف','الاسم','item','name','Item Name','description','الوصف'],qty:['الكمية','كمية النظام','الرصيد','qty','quantity','stock','balance'],unit:['الوحدة','وحدة','unit','uom','Unit'],cost:['التكلفة','تكلفة','تكلفة الصنف','سعر التكلفة','cost','Cost','unit cost','Unit Cost','price','Price']};
+      const source=type==='other'?'الوحدات الأخرى':'الوحدة الرئيسية';
+      const imported=[]; const seen=new Set();
+      rows.forEach(r=>{
+        const barcode=normalizeBarcodeValue(sanabelPick(r,keys.barcode));
+        if(!/^\d{3,}$/.test(barcode)) return;
+        const key=barcode+'|'+source;
+        if(seen.has(key)) return;
+        seen.add(key);
+        imported.push({
+          barcode,
+          name:String(sanabelPick(r,keys.name)||'بدون اسم').trim(),
+          qty:sanabelParseNumber(sanabelPick(r,keys.qty)),
+          unit:String(sanabelPick(r,keys.unit)||'').trim(),
+          cost:sanabelParseNumber(sanabelPick(r,keys.cost)),
+          source
+        });
+      });
+      if(!imported.length) throw new Error('لم يتم العثور على أعمدة الباركود واسم الصنف داخل الملف. تأكد أن الملف يحتوي ورقة بيانات وليست ملاحظات فقط.');
+      if(type==='other') window.itemsOther=itemsOther=imported; else window.itemsMain=itemsMain=imported;
+      if(typeof rebuildItems==='function') rebuildItems(); else window.items=items=[...(itemsMain||[]),...(itemsOther||[])];
+      try{ if(typeof fileSignature==='function'){ const sig=await fileSignature(file,buffer); importHistory.unshift({signature:sig,type,name:file.name,size:file.size,datetime:typeof nowText==='function'?nowText():new Date().toLocaleString('en-GB'),count:imported.length,sheet:chosen.name}); } }catch(_){ importHistory.unshift({signature:file.name+'_'+file.size,type,name:file.name,size:file.size,datetime:new Date().toLocaleString('en-GB'),count:imported.length,sheet:chosen.name}); }
+      importHistory=importHistory.slice(0,80);
+      localStorage.setItem('sanabel_items_main',JSON.stringify(itemsMain||[]));
+      localStorage.setItem('sanabel_items_other',JSON.stringify(itemsOther||[]));
+      localStorage.setItem('sanabel_items',JSON.stringify(items||[]));
+      localStorage.setItem('sanabel_import_history',JSON.stringify(importHistory||[]));
+      if(typeof saveAll==='function') saveAll();
+      try{
+        if(typeof cloudSet==='function'){
+          cloudSet('itemsMain',itemsMain||[]); cloudSet('itemsOther',itemsOther||[]); cloudSet('items',items||[]); cloudSet('importHistory',importHistory||[]);
+        }else if(typeof syncItemsCloud==='function') syncItemsCloud();
+      }catch(_){ }
+      if(typeof renderItemsTable==='function') renderItemsTable();
+      if(typeof updateKpis==='function') updateKpis();
+      const msg=document.getElementById('importMsg');
+      if(msg) msg.innerHTML='<div class="ok">تم استيراد '+imported.length+' صنف في ملف <b>'+listName+'</b> من ورقة <b>'+(chosen.name||'-')+'</b>. إجمالي الأصناف الآن: <b>'+(items||[]).length+'</b></div>';
+    }catch(err){
+      console.error(err);
+      const msg=document.getElementById('importMsg');
+      if(msg) msg.innerHTML='<div class="warn">تعذر الاستيراد: '+(err.message||err)+'</div>';
+      alert('تعذر الاستيراد: '+(err.message||err));
+    }finally{
+      if(input) input.value='';
+    }
+  };
+  reader.onerror=()=>{ alert('تعذر قراءة الملف. جرّب حفظه بصيغة xlsx من جديد.'); if(input) input.value=''; };
+  reader.readAsArrayBuffer(file);
+}
+function clearItems(){
+  if(confirm('مسح جميع الأصناف المستوردة من الرئيسي والوحدات الأخرى؟')){
+    items=[]; itemsMain=[]; itemsOther=[];
+    localStorage.setItem('sanabel_items',JSON.stringify(items));
+    localStorage.setItem('sanabel_items_main',JSON.stringify(itemsMain));
+    localStorage.setItem('sanabel_items_other',JSON.stringify(itemsOther));
+    try{ if(typeof cloudSet==='function'){ cloudSet('items',[]); cloudSet('itemsMain',[]); cloudSet('itemsOther',[]); } }catch(_){ }
+    if(typeof saveAll==='function') saveAll();
+    if(typeof renderItemsTable==='function') renderItemsTable();
+    if(typeof updateKpis==='function') updateKpis();
+    const msg=document.getElementById('importMsg'); if(msg) msg.innerHTML='<div class="ok">تم مسح الأصناف من الجهاز والمزامنة.</div>';
+  }
+}
+/* ===== نهاية إصلاح سنابل ===== */`;
+function patchHtml(html){
+  let out=html;
+  // remove old importer block from normalizeBarcodeValue/importExcel through before clearInventory/export section
+  const importBlock=/function normalizeBarcodeValue\(v\)[\s\S]*?function importExcelToList\(e,type\)[\s\S]*?reader\.readAsArrayBuffer\(file\);\s*}\s*/;
+  if(importBlock.test(out)) out=out.replace(importBlock,FIX_CODE+'\n');
+  else out=out.replace(/<\/script>/i,FIX_CODE+'\n</script>');
+  // remove duplicate old clearItems if still exists after fix code
+  out=out.replace(/function clearItems\(\)\{if\(confirm\([\s\S]*?renderItemsTable\(\);\}\}/g,'');
+  // add cache marker
+  out=out.replace(/<title>(.*?)<\/title>/i,'<title>$1 - إصلاح الاستيراد</title>');
+  return out;
+}
+function patchNow(){
+ const f=document.getElementById('file').files[0]; const ok=document.getElementById('ok'), bad=document.getElementById('bad'); ok.style.display='none';bad.style.display='none';
+ if(!f){bad.textContent='اختر ملف index.html أولاً';bad.style.display='block';return;}
+ const r=new FileReader();
+ r.onload=()=>{
+  try{
+   const patched=patchHtml(String(r.result||''));
+   const a=document.createElement('a');
+   a.href=URL.createObjectURL(new Blob([patched],{type:'text/html;charset=utf-8'}));
+   a.download='index.html';
+   a.click();
+   ok.innerHTML='تم تجهيز النسخة المعدلة وتنزيلها باسم <b>index.html</b>. ارفعها مكان القديمة وجرب استيراد الملفين.'; ok.style.display='block';
+  }catch(e){bad.textContent='فشل التعديل: '+e.message;bad.style.display='block';}
+ };
+ r.readAsText(f,'utf-8');
+}
+</script>
+</body>
+</html>
