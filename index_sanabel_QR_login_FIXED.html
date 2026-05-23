@@ -1,0 +1,2594 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>تطبيق جرد أسواق سنابل المع - إصلاح الدخول والاستيراد</title>
+  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script>
+function importPastedData(){
+  try{
+    const area=document.getElementById('pasteArea');
+    const raw=String(area?.value||'').trim();
+    if(!raw){appNotice('تنبيه','الصق جدول الأصناف أولاً.');return;}
+    const rows=raw.split(/\r?\n/).filter(x=>x.trim()).map(line=>{
+      if(line.includes('\t')) return line.split('\t').map(x=>String(x).trim());
+      if(line.includes(';')) return line.split(';').map(x=>String(x).trim());
+      return line.split(',').map(x=>String(x).trim());
+    });
+    function norm(s){return String(s||'').replace(/\ufeff/g,'').replace(/[إأآا]/g,'ا').replace(/ة/g,'ه').replace(/\s+/g,' ').trim().toLowerCase();}
+    function isBarcode(v){const s=String(v||'').trim().replace(/\s+/g,''); return /^[0-9]{5,20}$/.test(s)||/^[0-9]+\.0+$/.test(s);}
+    function isHeader(r){const j=norm(r.join(' '));return j.includes('باركود')||j.includes('barcode')||j.includes('الصنف')||j.includes('اسم')||j.includes('كميه')||j.includes('وحده')||j.includes('تكلف');}
+    let headerIndex=rows.findIndex(isHeader), headers, dataRows;
+    if(headerIndex>=0){headers=rows[headerIndex].map(norm);dataRows=rows.slice(headerIndex+1);}
+    else{headers=['باركود','اسم الصنف','كمية','وحدة','تكلفة'].map(norm);dataRows=rows;}
+    function f(names){names=names.map(norm);for(let i=0;i<headers.length;i++){let h=headers[i];if(names.some(n=>h===n||h.includes(n)||n.includes(h)))return i;}return -1;}
+    let b=f(['barcode','bar code','باركود','الباركود','كود الصنف','كود','رقم الصنف']);
+    let n=f(['item','name','اسم الصنف','الصنف','الاسم','اسم','الوصف','البيان']);
+    let q=f(['qty','quantity','كمية','الكميه','الكمية','رصيد','عدد','كمية النظام']);
+    let u=f(['unit','وحدة','الوحدة','الوحده','وحده']);
+    let c=f(['cost','تكلفة','التكلفة','التكلفه','سعر التكلفة','سعر التكلفه','سعر']);
+    if(dataRows.length){
+      const scores=headers.map((_,col)=>dataRows.slice(0,80).filter(r=>isBarcode(r[col])).length);
+      const best=scores.indexOf(Math.max(...scores));
+      if(best>=0 && scores[best]>0 && (b<0 || scores[best]>(scores[b]||0))) b=best;
+    }
+    if(n<0){
+      for(let i=0;i<headers.length;i++){
+        if(i!==b && dataRows.slice(0,30).some(r=>String(r[i]||'').trim()&&!isBarcode(r[i]))){n=i;break;}
+      }
+    }
+    if(b<0||n<0){appNotice('تعذر التعرف على الأعمدة','انسخ بالعناوين: الباركود، اسم الصنف، الكمية، الوحدة، التكلفة.');return;}
+    function clean(v){let s=String(v??'').trim().replace(/\s+/g,'');if(/^[0-9]+\.0+$/.test(s))s=s.replace(/\.0+$/,'');return s;}
+    function numv(v){const x=Number(String(v??'').replace(/,/g,'').trim());return isNaN(x)?0:x;}
+    if(!Array.isArray(items))items=[];
+    const by=new Map(); items.forEach((it,i)=>{const code=clean(it.barcode);if(code)by.set(code,i);});
+    let added=0,updated=0,skipped=0;
+    dataRows.forEach(r=>{
+      const barcode=clean(r[b]), name=String(r[n]??'').trim();
+      if(!barcode||!name||!isBarcode(barcode)||isHeader(r)){skipped++;return;}
+      const obj={barcode,name,item:name,qty:q>=0?numv(r[q]):0,unit:u>=0?String(r[u]??'').trim():'',cost:c>=0?numv(r[c]):0};
+      if(by.has(barcode)){items[by.get(barcode)]={...items[by.get(barcode)],...obj};updated++;}
+      else{items.push(obj);by.set(barcode,items.length-1);added++;}
+    });
+    itemsMain=items.map(x=>({...x})); itemsOther=[];
+    safeSet('sanabel_items',JSON.stringify(items));
+    safeSet('sanabel_items_main',JSON.stringify(itemsMain));
+    safeSet('sanabel_items_other',JSON.stringify(itemsOther));
+    try{saveAll();}catch(e){}
+    try{syncItemsCloud();}catch(e){}
+    try{renderItemsTable();updateKpis();}catch(e){}
+    if(area)area.value='';
+    const msg=document.getElementById('importMsg');
+    if(msg)msg.innerHTML=`<div class="ok">تم الاستيراد بنجاح<br>جديد: <b>${added}</b> — تحديث: <b>${updated}</b> — تجاهل: <b>${skipped}</b><br>إجمالي الأصناف: <b>${items.length}</b></div>`;
+  }catch(err){console.error(err);appNotice('خطأ','حدث خطأ أثناء قراءة البيانات: '+err.message);}
+}
+
+</script>
+  <script src="https://cdn.jsdelivr.net/npm/@ericblade/quagga2@1.8.4/dist/quagga.min.js"></script>
+  <script src="https://unpkg.com/@zxing/library@0.20.0/umd/index.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+  <style>
+    :root{--bg:#0b1220;--card:#111a2e;--card2:#16213a;--gold:#f4c542;--text:#f8fafc;--muted:#a8b3c7;--ok:#22c55e;--bad:#ef4444;--line:#2b3858;--blue:#38bdf8;--side:104px}
+    *{box-sizing:border-box}
+    body{margin:0;font-family:Tahoma,Arial,sans-serif;background:linear-gradient(135deg,#07101f,#14213d);color:var(--text);font-size:16px;font-weight:700;min-height:100vh}
+    header{position:sticky;top:0;z-index:20;background:rgba(7,16,31,.95);border-bottom:1px solid var(--line);padding:12px 18px;display:flex;gap:10px;align-items:center;justify-content:space-between;backdrop-filter:blur(8px);margin-right:var(--side)}
+    .brand{display:flex;gap:10px;align-items:center}.logo{width:46px;height:46px;border-radius:15px;background:linear-gradient(135deg,#f4c542,#7c5a05);display:grid;place-items:center;color:#111;font-size:25px}.brand h1{margin:0;font-size:18px}.brand p{margin:3px 0 0;color:var(--muted);font-size:12px}
+    .desktopNav{position:fixed;right:0;top:0;bottom:0;width:var(--side);background:rgba(8,15,29,.98);border-left:1px solid var(--line);z-index:30;padding:12px 8px;display:flex;flex-direction:column;gap:10px;align-items:center}
+    .navLogo{width:54px;height:54px;border-radius:18px;background:linear-gradient(135deg,#f4c542,#8a6508);display:grid;place-items:center;color:#111;font-size:27px;margin-bottom:4px}
+    .navBtn{width:86px;min-height:72px;border-radius:18px;border:1px solid var(--line);background:#121d34;color:#fff;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;padding:7px;cursor:pointer;transition:.15s;box-shadow:0 8px 20px rgba(0,0,0,.12)}
+    .navBtn span:first-child{font-size:24px}.navBtn span:last-child{font-size:11px;line-height:1.2}.navBtn.active{background:linear-gradient(135deg,#f4c542,#c99b13);color:#111;border-color:#f4c542;transform:translateX(-2px)}
+    main{max-width:1240px;margin:0 auto;padding:16px 16px 88px;display:block;margin-right:var(--side)}
+    .page{display:none}.page.active{display:block;animation:fade .18s ease-in}@keyframes fade{from{opacity:.45;transform:translateY(6px)}to{opacity:1;transform:none}}
+    .grid{display:grid;grid-template-columns:repeat(12,1fr);gap:14px}.card{background:rgba(17,26,46,.96);border:1px solid var(--line);border-radius:20px;padding:16px;box-shadow:0 10px 30px rgba(0,0,0,.18)}
+    .hero{display:grid;grid-template-columns:1.1fr .9fr;gap:16px;align-items:stretch}.heroTitle{font-size:26px;margin:0 0 8px;color:#fff}.heroText{color:var(--muted);line-height:1.9;margin:0}.homeIcons{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.homeIcon{background:linear-gradient(180deg,#16213a,#101a30);border:1px solid var(--line);border-radius:22px;padding:18px;min-height:132px;text-align:center;cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:9px}.homeIcon b{font-size:36px}.homeIcon span{font-size:14px;color:#fff}.homeIcon small{color:var(--muted);line-height:1.5}
+    .col-4{grid-column:span 4}.col-5{grid-column:span 5}.col-6{grid-column:span 6}.col-7{grid-column:span 7}.col-8{grid-column:span 8}.col-12{grid-column:span 12}
+    h2{font-size:18px;margin:0 0 12px;color:var(--gold)}label{display:block;margin:9px 0 6px;color:#dbeafe}input,select,button{font-family:inherit;font-size:16px;font-weight:700}input,select{width:100%;padding:12px;border-radius:12px;border:1px solid var(--line);background:#0b1326;color:var(--text);outline:none}input:focus{border-color:var(--gold)}
+    button{border:0;border-radius:12px;padding:11px 14px;cursor:pointer;background:var(--gold);color:#111;transition:.15s}.btn2{background:#22304f;color:#fff;border:1px solid var(--line)}.btnBlue{background:var(--blue);color:#062033}.btnRed{background:var(--bad);color:#fff}.btnGreen{background:var(--ok);color:#052e16}.actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.row{display:grid;grid-template-columns:1fr 140px;gap:10px}
+    .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px}.kpi{background:var(--card2);border:1px solid var(--line);border-radius:16px;padding:13px}.kpi span{color:var(--muted);font-size:12px}.kpi b{display:block;font-size:22px;margin-top:5px;color:#fff}
+    table{width:100%;border-collapse:collapse;margin-top:10px;font-size:14px}th,td{border-bottom:1px solid var(--line);padding:10px;text-align:right;vertical-align:top}th{color:var(--gold);background:#0b1326;position:sticky;top:75px}tr:hover td{background:rgba(255,255,255,.03)}.muted{color:var(--muted);font-size:13px}.pill{display:inline-block;border-radius:999px;padding:5px 9px;background:#22304f;color:#e0f2fe;font-size:12px}.warn{background:rgba(239,68,68,.15);border:1px solid rgba(239,68,68,.4);color:#fecaca;padding:10px;border-radius:12px;margin-top:10px}.ok{background:rgba(34,197,94,.15);border:1px solid rgba(34,197,94,.4);color:#bbf7d0;padding:10px;border-radius:12px;margin-top:10px}.hide{display:none!important}#reader{width:100%;overflow:hidden;border-radius:16px;background:#000;min-height:220px}.small{font-size:12px;color:var(--muted);line-height:1.8}.toolbar{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}.resultBox{border:1px dashed var(--line);border-radius:14px;padding:12px;background:#0b1326;margin-top:10px}.diffPlus{color:#fca5a5}.diffMinus{color:#86efac}.diffZero{color:#e5e7eb}.printOnly{display:none}.tableWrap{max-height:64vh;overflow:auto;border-radius:14px}
+    .mobileTabs{display:none;position:fixed;bottom:0;left:0;right:0;z-index:40;background:rgba(8,15,29,.98);border-top:1px solid var(--line);padding:7px 6px;gap:5px;justify-content:space-around}.mobileTabs .navBtn{width:auto;flex:1;min-height:58px;border-radius:14px}.mobileTabs .navBtn span:first-child{font-size:21px}.mobileTabs .navBtn span:last-child{font-size:10px}
+
+    .scannerShell{position:relative;border-radius:18px;overflow:hidden;background:#000;border:1px solid var(--line);margin-top:10px}
+    .scannerShell video,.scannerShell canvas{width:100%!important;max-height:62vh;object-fit:cover;border-radius:16px}
+    #quaggaReader{width:100%;min-height:320px;background:#000;border-radius:16px;overflow:hidden}
+    #quaggaReader video{width:100%!important;height:auto!important;min-height:320px;object-fit:cover}
+    #quaggaReader canvas{display:none}
+    .scanTarget{position:absolute;left:6%;right:6%;top:38%;height:24%;border:3px solid rgba(244,197,66,.95);border-radius:16px;z-index:8;box-shadow:0 0 0 999px rgba(0,0,0,.22)}
+    .scanTarget:before{content:"";position:absolute;left:4%;right:4%;top:50%;height:2px;background:#22c55e;box-shadow:0 0 12px #22c55e}
+    .scannerHint{position:absolute;left:12px;right:12px;bottom:10px;background:rgba(0,0,0,.62);color:#fff;border:1px solid rgba(255,255,255,.18);border-radius:12px;padding:8px;text-align:center;z-index:9;font-size:13px}
+    .scannerShell.active .scannerHint{display:block}
+    .beepFlash{animation:beepFlash .45s ease}
+    @keyframes beepFlash{0%{box-shadow:0 0 0 0 rgba(34,197,94,.0)}40%{box-shadow:0 0 0 5px rgba(34,197,94,.55)}100%{box-shadow:0 0 0 0 rgba(34,197,94,0)}}
+    .scanTip{background:rgba(56,189,248,.12);border:1px solid rgba(56,189,248,.35);color:#dff6ff;padding:10px;border-radius:12px;margin-top:10px;line-height:1.8}
+
+
+    .appModalOverlay{position:fixed;inset:0;background:rgba(0,0,0,.68);z-index:9999;display:none;align-items:center;justify-content:center;padding:16px}
+    .appModalOverlay.show{display:flex}
+    .appModal{background:linear-gradient(180deg,#14213d,#0b1326);border:1px solid var(--line);border-radius:24px;max-width:480px;width:100%;padding:20px;box-shadow:0 24px 80px rgba(0,0,0,.45);text-align:right}
+    .appModal h3{margin:0 0 10px;color:var(--gold);font-size:20px}.appModal p{margin:0;color:#e5e7eb;line-height:1.9}.appModal .modalActions{display:flex;gap:10px;flex-wrap:wrap;margin-top:16px}
+    .scanItemCard{background:linear-gradient(135deg,#083344,#14532d);border:2px solid rgba(34,197,94,.65);border-radius:22px;padding:16px;box-shadow:0 12px 35px rgba(0,0,0,.25)}
+    .scanItemCard .title{font-size:22px;color:#fff;margin-bottom:12px;line-height:1.5}.scanItemCard .metaGrid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:10px 0}
+    .scanItemCard .meta{background:rgba(255,255,255,.10);border:1px solid rgba(255,255,255,.14);border-radius:14px;padding:12px}.scanItemCard .meta span{display:block;color:#bae6fd;font-size:12px;margin-bottom:5px}.scanItemCard .meta b{font-size:20px;color:#fff}
+    .scanItemCard .barcodeLine{background:rgba(0,0,0,.22);border-radius:12px;padding:9px;color:#e0f2fe;margin-bottom:10px;direction:ltr;text-align:center}
+    .scanItemCard .editMini{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}.previousWarn{background:rgba(239,68,68,.20);border:1px solid rgba(239,68,68,.55);color:#fecaca;padding:10px;border-radius:14px;margin-top:10px;line-height:1.7}
+    @media(max-width:520px){.scanItemCard .metaGrid{grid-template-columns:1fr}.scanItemCard .title{font-size:19px}}
+
+
+    .userBox{display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:rgba(255,255,255,.06);border:1px solid var(--line);border-radius:14px;padding:8px}
+    .userBox select{min-width:170px;width:auto;padding:9px}.userBox input{min-width:160px;width:auto;padding:9px}
+    .userBadge{display:inline-block;background:rgba(244,197,66,.16);border:1px solid rgba(244,197,66,.45);color:#fde68a;border-radius:999px;padding:6px 10px;font-size:12px}
+    @media(max-width:650px){.userBox{width:100%}.userBox select,.userBox input{width:100%;min-width:0}}
+
+
+
+    /* فتح آمن: لا تظهر أي واجهة قبل صفحة الدخول */
+    body.login-first header,
+    body.login-first main,
+    body.login-first .desktopNav,
+    body.login-first .mobileTabs{
+      display:none!important;
+    }
+    body.login-first #loginOverlay{
+      display:flex!important;
+    }
+    .loginOverlay{position:fixed;inset:0;background:linear-gradient(135deg,#07101f,#14213d);z-index:10000;display:none;align-items:center;justify-content:center;padding:18px}
+    .loginOverlay.show{display:flex}
+    .loginCard{max-width:430px;width:100%;background:rgba(17,26,46,.98);border:1px solid var(--line);border-radius:26px;padding:22px;box-shadow:0 28px 90px rgba(0,0,0,.45);text-align:center}
+    .loginCard .bigLogo{width:74px;height:74px;border-radius:24px;background:linear-gradient(135deg,#f4c542,#8a6508);display:grid;place-items:center;color:#111;font-size:38px;margin:0 auto 14px}
+    .pinInput{text-align:center;direction:ltr;font-size:28px;letter-spacing:8px}
+    .userBox{display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:rgba(255,255,255,.06);border:1px solid var(--line);border-radius:14px;padding:8px}
+    .userBox input{min-width:145px;width:auto;padding:9px}
+    .userBadge{display:inline-block;background:rgba(244,197,66,.16);border:1px solid rgba(244,197,66,.45);color:#fde68a;border-radius:999px;padding:6px 10px;font-size:12px}
+    .adminUsersPanel{margin-top:10px;background:rgba(255,255,255,.04);border:1px solid var(--line);border-radius:14px;padding:10px}
+    @media(max-width:650px){.userBox{width:100%}.userBox input{width:100%;min-width:0}}
+
+
+    .topTools{width:100%;display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:flex-start}
+    .settingsToggle{background:#22304f!important;color:#fff!important;border:1px solid var(--line)!important}
+    .collapsibleSettings{width:100%;display:none;gap:8px;flex-wrap:wrap;margin-top:8px}
+    .collapsibleSettings.show{display:flex}
+
+    .cloudBadge{display:inline-flex;align-items:center;gap:6px;background:rgba(56,189,248,.12);border:1px solid rgba(56,189,248,.38);color:#dff6ff;border-radius:999px;padding:7px 10px;font-size:12px}
+    .cloudBadge.okCloud{background:rgba(34,197,94,.14);border-color:rgba(34,197,94,.45);color:#bbf7d0}
+    .cloudBadge.badCloud{background:rgba(239,68,68,.14);border-color:rgba(239,68,68,.45);color:#fecaca}
+
+
+    .approvalBadge{display:inline-block;border-radius:999px;padding:5px 9px;font-size:12px;border:1px solid var(--line);background:#22304f;color:#fff}
+    .approvalBadge.pending{background:rgba(244,197,66,.16);border-color:rgba(244,197,66,.55);color:#fde68a}
+    .approvalBadge.approved{background:rgba(34,197,94,.16);border-color:rgba(34,197,94,.55);color:#bbf7d0}
+    .settingsUsersBox{width:100%;display:none;background:rgba(255,255,255,.04);border:1px solid var(--line);border-radius:14px;padding:10px;margin-top:8px}
+    .settingsUsersBox.show{display:block}
+    .settingsUsersBox table input{padding:8px;font-size:13px}
+
+    /* إصلاح تراكب إدارة المستخدمين + صلاحيات الأدوار */
+    #settingsPanel.collapsibleSettings{width:100%;flex-direction:column;align-items:stretch;background:rgba(15,23,42,.96);border:1px solid var(--line);border-radius:18px;padding:12px}
+    #settingsPanel .userBox{width:100%;justify-content:flex-start}
+    .settingsUsersBox{overflow:hidden}
+    .settingsUsersBox .tableWrap{max-height:none;overflow-x:auto;border:1px solid var(--line);border-radius:14px;background:#0b1326}
+    .settingsUsersBox table{min-width:720px;margin-top:0;table-layout:fixed}
+    .settingsUsersBox th,.settingsUsersBox td{position:static!important;vertical-align:middle;white-space:normal}
+    .settingsUsersBox th:nth-child(1),.settingsUsersBox td:nth-child(1){width:30%}
+    .settingsUsersBox th:nth-child(2),.settingsUsersBox td:nth-child(2){width:22%}
+    .settingsUsersBox th:nth-child(3),.settingsUsersBox td:nth-child(3){width:22%}
+    .settingsUsersBox th:nth-child(4),.settingsUsersBox td:nth-child(4){width:26%}
+    .settingsUsersBox table input,.settingsUsersBox table select{width:100%;min-width:0;padding:10px;font-size:14px}
+    .settingsUsersBox td .actions{display:flex;gap:6px;flex-wrap:wrap;width:auto}
+    .roleHint{margin-top:8px;background:rgba(56,189,248,.10);border:1px solid rgba(56,189,248,.35);color:#dff6ff;border-radius:12px;padding:10px;line-height:1.8}
+    .pendingNotice{background:rgba(244,197,66,.14);border:1px solid rgba(244,197,66,.45);color:#fde68a;border-radius:16px;padding:12px;margin-bottom:12px;display:none}
+    .pendingNotice.show{display:block}
+    .permHidden{display:none!important}
+
+
+    @media(max-width:900px){
+      header .actions{width:100%}
+      .topTools{justify-content:flex-start}
+      .collapsibleSettings .userBox{width:100%}
+      .collapsibleSettings .userBox input,.collapsibleSettings .userBox select{width:100%}
+    }
+
+
+    .cloudBadge{display:inline-flex;align-items:center;gap:6px;background:rgba(56,189,248,.12);border:1px solid rgba(56,189,248,.38);color:#dff6ff;border-radius:999px;padding:7px 10px;font-size:12px}
+    .cloudBadge.okCloud{background:rgba(34,197,94,.14);border-color:rgba(34,197,94,.45);color:#bbf7d0}
+    .cloudBadge.badCloud{background:rgba(239,68,68,.14);border-color:rgba(239,68,68,.45);color:#fecaca}
+
+
+    .approvalBadge{display:inline-block;border-radius:999px;padding:5px 9px;font-size:12px;border:1px solid var(--line);background:#22304f;color:#fff}
+    .approvalBadge.pending{background:rgba(244,197,66,.16);border-color:rgba(244,197,66,.55);color:#fde68a}
+    .approvalBadge.approved{background:rgba(34,197,94,.16);border-color:rgba(34,197,94,.55);color:#bbf7d0}
+    .settingsUsersBox{width:100%;display:none;background:rgba(255,255,255,.04);border:1px solid var(--line);border-radius:14px;padding:10px;margin-top:8px}
+    .settingsUsersBox.show{display:block}
+    .settingsUsersBox table input{padding:8px;font-size:13px}
+
+    @media(max-width:900px){:root{--side:0px}header{margin-right:0;align-items:flex-start;flex-direction:column}.desktopNav{display:none}.mobileTabs{display:flex}main{margin-right:0;padding:12px 10px 88px}.hero{grid-template-columns:1fr}.homeIcons{grid-template-columns:repeat(2,1fr)}.col-4,.col-5,.col-6,.col-7,.col-8{grid-column:span 12}.kpis{grid-template-columns:repeat(2,1fr)}.actions{width:100%;justify-content:flex-start}.row{grid-template-columns:1fr}.heroTitle{font-size:21px}.card{padding:13px;border-radius:17px}table{font-size:13px;min-width:820px}th,td{padding:8px}.tableWrap{overflow:auto}#reader{min-height:260px}}
+    @media(max-width:420px){.homeIcons{grid-template-columns:1fr}.kpis{grid-template-columns:1fr}.brand h1{font-size:16px}.brand p{font-size:11px}}
+
+    .sessionPrintArea{display:none}
+    @media print{
+      @page{size:A4 landscape;margin:6mm}
+      body.printSessionOnly header,
+      body.printSessionOnly .desktopNav,
+      body.printSessionOnly .mobileTabs,
+      body.printSessionOnly main,
+      body.printSessionOnly .noPrint{display:none!important}
+      body.printSessionOnly{background:#fff!important}
+      body.printSessionOnly .sessionPrintArea{display:block!important;color:#000;background:#fff;padding:0;width:100%;direction:rtl;font-family:Tahoma,Arial,sans-serif}
+      body.printSessionOnly .sessionPrintArea h1{font-size:22px;margin:0 0 6px;color:#000;text-align:center;font-weight:900}
+      body.printSessionOnly .sessionPrintArea p{font-size:12px;margin:2px 0;color:#000}
+      body.printSessionOnly .printKpiGrid{display:grid;grid-template-columns:repeat(5,1fr);gap:4px;margin:5px 0 6px}
+      body.printSessionOnly .printKpi{border:1px solid #777;border-radius:6px;padding:5px;text-align:center;min-height:46px;background:#f8fafc}
+      body.printSessionOnly .printKpi .ico{font-size:15px;display:block;line-height:1}
+      body.printSessionOnly .printKpi span{display:block;font-size:10px;font-weight:900;margin-bottom:2px}
+      body.printSessionOnly .printKpi b{display:block;font-size:18px;line-height:1.05}
+      body.printSessionOnly .printMeta{display:grid;grid-template-columns:repeat(4,1fr);gap:3px;margin:4px 0 6px}
+      body.printSessionOnly .printMeta div{border:1px solid #999;border-radius:4px;padding:4px;font-size:11px;font-weight:900;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+      body.printSessionOnly .printTable{width:100%;border-collapse:collapse;table-layout:fixed;font-size:10.6px;margin-top:4px}
+      body.printSessionOnly .printTable th{background:#111!important;color:#fff!important;border:1px solid #333;padding:4px 3px;text-align:center;font-size:10.2px;font-weight:900;position:static!important}
+      body.printSessionOnly .printTable td{border:1px solid #555;padding:4px 3px;color:#000;background:#fff;text-align:center;vertical-align:middle;font-weight:800;line-height:1.25;word-break:break-word;white-space:normal}
+      body.printSessionOnly .printTable .itemName{text-align:right;font-size:10.8px}
+      body.printSessionOnly .printTable .barcode{direction:ltr;font-size:10.3px;letter-spacing:.1px}
+      body.printSessionOnly .diffNeg{color:#dc2626!important;font-weight:900}
+      body.printSessionOnly .diffPos{color:#16a34a!important;font-weight:900}
+      body.printSessionOnly .diffZero{color:#111!important;font-weight:900}
+      body.printSessionOnly .printFoot{margin-top:5px;text-align:center;font-size:10px;border-top:1px solid #999;padding-top:4px}
+    }
+
+
+    /* سجل حركة الصنف */
+    .trackSearchBox{display:grid;grid-template-columns:1fr 150px 150px 150px;gap:10px;align-items:end;margin-top:10px}
+    .trackStats{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin:12px 0}
+    .trackStat{background:linear-gradient(180deg,#16213a,#101a30);border:1px solid var(--line);border-radius:18px;padding:13px;text-align:center}
+    .trackStat span{display:block;color:var(--muted);font-size:12px;margin-bottom:6px}.trackStat b{font-size:22px;color:#fff}
+    .trackStat.bad b,.trackBad{color:#f87171!important}.trackStat.good b,.trackGood{color:#22c55e!important}.trackZero{color:#e5e7eb!important}
+    .trackSuggestions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}.trackSuggestions button{background:#22304f;color:#fff;border:1px solid var(--line)}
+    #trackResults table{min-width:1050px;table-layout:fixed}#trackResults th,#trackResults td{white-space:normal;word-break:break-word;vertical-align:middle}
+    @media(max-width:800px){.trackSearchBox{grid-template-columns:1fr}.trackStats{grid-template-columns:1fr 1fr}#trackResults table{min-width:980px}}
+
+    @media print{body{background:#fff;color:#000;font-size:12px}.noPrint,header,.desktopNav,.mobileTabs,.page:not(#page-report),.card:not(.printCard){display:none!important}.printOnly{display:block}.printCard{background:#fff;border:0;box-shadow:none;color:#000}.printCard h2{color:#000}.printCard table th,.printCard table td{border:1px solid #000;color:#000;background:#fff}main{max-width:none;padding:0;margin:0}th{position:static}.pill{border:1px solid #000;color:#000;background:#fff}.page{display:block!important}}
+  </style>
+
+<style>
+/* إصلاح عرض جدول الأصناف فقط */
+#itemsTbody td, #itemsTbody th{
+  white-space: normal !important;
+  word-break: normal !important;
+  overflow-wrap: anywhere !important;
+  line-height: 1.8 !important;
+}
+#itemsTbody td:nth-child(1){
+  direction:ltr !important;
+  text-align:center !important;
+  min-width:150px !important;
+}
+#itemsTbody td:nth-child(2){
+  min-width:320px !important;
+  text-align:right !important;
+}
+#page-items table{
+  min-width:980px !important;
+}
+</style>
+
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
+</head>
+<body class="login-first">
+
+<script>
+(function(){
+  function fixSanabelLoginUsers(){
+    try{
+      var raw = localStorage.getItem('sanabel_users');
+      var users = [];
+      try{ users = raw ? JSON.parse(raw) : []; }catch(e){ users = []; }
+      if(!Array.isArray(users)) users = [];
+      var hasAdmin1234 = users.some(function(u){
+        return String((u&&u.pin)||'') === '1234' && (String((u&&u.role)||'') === 'مدير' || String((u&&u.role)||'') === 'admin');
+      });
+      if(!hasAdmin1234){
+        users.unshift({name:'ابوقصي', pin:'1234', role:'مدير'});
+        localStorage.setItem('sanabel_users', JSON.stringify(users));
+      }
+      localStorage.removeItem('sanabel_current_user');
+      localStorage.removeItem('currentUser');
+    }catch(e){}
+  }
+  fixSanabelLoginUsers();
+})();
+</script>
+
+<nav class="desktopNav noPrint">
+  <div class="navLogo">🌾</div>
+  <button class="navBtn active" data-page="home" data-perm="home" onclick="showPage('home')"><span>🏠</span><span>الرئيسية</span></button>
+  <button class="navBtn" data-page="import" data-perm="import" onclick="showPage('import')"><span>📥</span><span>استيراد</span></button>
+  <button class="navBtn" data-page="scan" data-perm="scan" onclick="showPage('scan')"><span>📷</span><span>الجرد</span></button>
+  <button class="navBtn" data-page="items" data-perm="items" onclick="showPage('items')"><span>📦</span><span>الأصناف</span></button>
+  <button class="navBtn" data-page="track" data-perm="track" onclick="showPage('track')"><span>🔎</span><span>تتبع</span></button>
+  <button class="navBtn" data-page="report" data-perm="report" onclick="showPage('report')"><span>📊</span><span>التقرير</span></button>
+  <button class="navBtn" data-page="track" data-perm="track" onclick="showPage('track')"><span>🔎</span><span>تتبع الصنف</span></button>
+  <button class="navBtn" data-page="shelves" data-perm="shelves" onclick="showPage('shelves')"><span>🏷️</span><span>الرفوف</span></button>
+  <button class="navBtn" data-page="sessions" data-perm="sessions" onclick="showPage('sessions')"><span>🗂️</span><span>الجرد المغلق</span></button>
+</nav>
+<header class="noPrint">
+  <div class="brand"><div class="logo">🌾</div><div><h1>تطبيق جرد أسواق سنابل المع</h1><p>نسخة مرتبة للجوال والكمبيوتر</p></div></div>
+  <div class="actions">
+    <div class="topTools">
+      <span id="cloudStatus" class="cloudBadge">☁️ جاري الاتصال</span>
+      <button class="settingsToggle" data-manager-only="1" onclick="toggleSettingsPanel()">⚙️ الإعدادات</button>
+      <button class="btnGreen tr" data-key="closeInventory" data-perm="close" onclick="closeInventorySession()">إغلاق الجرد</button><button class="btn2" data-perm="close" onclick="logoutUser()">خروج</button><button class="btn2" data-manager-only="1" onclick="showPage('report'); setTimeout(()=>window.print(),150)">طباعة / PDF</button><button class="btnBlue" data-manager-only="1" onclick="exportInventoryExcel()">تصدير Excel</button><button class="btnGreen" data-manager-only="1" onclick="exportSmartCSV()">تصدير سمارت CSV</button><button class="btn2" data-manager-only="1" onclick="exportInventoryCSV()">CSV</button>
+    </div>
+    <div id="settingsPanel" class="collapsibleSettings">
+      <div class="userBox">
+      <span class="userBadge">الجارد: <b id="activeUserName">-</b></span>
+      <input id="newUserName" placeholder="اسم مستخدم جديد">
+      <input id="newUserPin" placeholder="رقم سري" inputmode="numeric" type="password">
+      <select id="newUserRole"><option value="موظف جرد">موظف جرد</option><option value="مدير">مدير</option></select>
+      <button class="btnBlue" onclick="addUser()" class="tr" data-key="addUser">إضافة مستخدم</button>
+      <button class="btn2" onclick="logoutUser()" class="tr" data-key="logout">تسجيل خروج</button>
+    </div><div class="userBox" style="margin-top:8px">
+  <span class="userBadge">اللغة</span>
+  <select id="langSelect" onchange="setLanguage(this.value)">
+    <option value="ar">العربية</option>
+    <option value="en">English</option>
+    <option value="ur">اردو</option>
+    <option value="bn">বাংলা</option>
+    <option value="hi">हिन्दी</option>
+  </select>
+</div>
+
+      <div class="settingsUsersBox show" id="settingsUsersBox">
+        <h2>إدارة المستخدمين</h2>
+        <p class="small">يمكنك تعديل اسم المستخدم أو الرقم السري أو الدور أو حذف المستخدم. المدير الأساسي لا يُحذف.</p><div class="roleHint"><b>صلاحيات الأدوار:</b> المدير يشاهد كل الأقسام ويعتمد الجرد. موظف الجرد تظهر له شاشة الجرد وزر إغلاق الجرد فقط، وتبقى المزامنة فورية بين الأجهزة.</div>
+        <div class="tableWrap">
+          <table>
+            <thead><tr><th>الاسم</th><th>الرقم السري</th><th>الدور</th><th>الإجراءات</th></tr></thead>
+            <tbody id="usersManageBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+</div>
+</header>
+<main>
+  <div id="pendingAdminNotice" class="pendingNotice noPrint"></div>
+  <section class="kpis noPrint" data-manager-only="1">
+    <div class="kpi"><span>عدد الأصناف المستوردة</span><b id="kpiItems">0</b></div>
+    <div class="kpi"><span>عدد الأصناف المجردة</span><b id="kpiCounted">0</b></div>
+    <div class="kpi"><span>إجمالي فرق الجرد</span><b id="kpiDiff">0</b></div>
+    <div class="kpi"><span>آخر جرد</span><b id="kpiLast">-</b></div>
+  </section>
+
+  <section id="page-home" class="page active noPrint">
+    <div class="hero">
+      <div class="card">
+        <h2 class="heroTitle">لوحة جرد سنابل المع</h2>
+        <p class="heroText">اختر القسم المطلوب من الأيقونات. في الكمبيوتر تظهر الأيقونات في الشريط الجانبي، وفي الجوال تظهر بالأسفل حتى تكون الشاشة مرتبة وواضحة.</p>
+        <div class="toolbar"><button data-perm="import" onclick="showPage('import')">ابدأ باستيراد الأصناف</button><button data-perm="scan" class="btnGreen" onclick="showPage('scan')">ابدأ الجرد بالكاميرا</button></div>
+      </div>
+      <div class="homeIcons">
+        <div class="homeIcon" data-perm="import" onclick="showPage('import')"><b>📥</b><span>استيراد الأصناف</span><small>Excel / CSV</small></div>
+        <div class="homeIcon" data-perm="scan" onclick="showPage('scan')"><b>📷</b><span>الجرد بالكاميرا</span><small>قراءة الباركود</small></div>
+        <div class="homeIcon" data-perm="items" onclick="showPage('items')"><b>📦</b><span>الأصناف</span><small>بحث ومراجعة</small></div>
+        <div class="homeIcon" data-perm="track" onclick="showPage('track')"><b>🔎</b><span>تتبع الصنف</span><small>تاريخ كل جرد للصنف</small></div>
+        <div class="homeIcon" data-perm="report" onclick="showPage('report')"><b>📊</b><span>تقرير الجرد الحالي</span><small>طباعة وتصدير</small></div>
+        <div class="homeIcon" data-perm="shelves" onclick="showPage('shelves')"><b>🏷️</b><span>الرفوف و QR</span><small>ترقيم وطباعة الرفوف</small></div>
+        <div class="homeIcon" data-perm="sessions" onclick="showPage('sessions')"><b>🗂️</b><span>الجرد المغلق</span><small>جرد رقم 1، 2، 3</small></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="page-import" class="page noPrint">
+    <div class="grid">
+      <div class="card col-12">
+        <h2>📋 استيراد الأصناف بالأعمدة الثابتة</h2>
+        <p class="small">انسخ كل عمود من Excel والصقه في الخانة الخاصة به. هذه الطريقة أضمن من لصق الجدول كاملًا.</p>
+        <div class="ok">
+          التحديث اليومي: إذا بتضيف أصناف فقط الصق الأعمدة واضغط استيراد. إذا بتبدأ ملف جديد اضغط أولاً “مسح الأصناف والبدء من جديد”.
+        </div>
+
+        <div class="grid" style="margin-top:12px">
+          <div class="card col-4">
+            <label>عمود الباركود</label>
+            <textarea id="colBarcode" placeholder="الصق الباركودات هنا، كل باركود في سطر" style="width:100%;min-height:260px;background:#0b1326;color:#fff;border:1px solid var(--line);border-radius:14px;padding:12px;direction:ltr;text-align:left"></textarea>
+          </div>
+          <div class="card col-8">
+            <label>عمود اسم الصنف</label>
+            <textarea id="colName" placeholder="الصق أسماء الأصناف هنا، كل صنف في سطر" style="width:100%;min-height:260px;background:#0b1326;color:#fff;border:1px solid var(--line);border-radius:14px;padding:12px;direction:rtl;text-align:right"></textarea>
+          </div>
+          <div class="card col-4">
+            <label>عمود التكلفة</label>
+            <textarea id="colCost" placeholder="الصق سعر التكلفة هنا" style="width:100%;min-height:210px;background:#0b1326;color:#fff;border:1px solid var(--line);border-radius:14px;padding:12px;direction:ltr;text-align:left"></textarea>
+          </div>
+          <div class="card col-4">
+            <label>عمود الكمية</label>
+            <textarea id="colQty" placeholder="الصق الكمية هنا" style="width:100%;min-height:210px;background:#0b1326;color:#fff;border:1px solid var(--line);border-radius:14px;padding:12px;direction:ltr;text-align:left"></textarea>
+          </div>
+          <div class="card col-4">
+            <label>عمود الوحدة</label>
+            <textarea id="colUnit" placeholder="الصق الوحدة هنا" style="width:100%;min-height:210px;background:#0b1326;color:#fff;border:1px solid var(--line);border-radius:14px;padding:12px;direction:rtl;text-align:right"></textarea>
+          </div>
+        </div>
+
+        <div class="toolbar">
+          <button class="btnGreen" onclick="importColumnsData()">استيراد الأعمدة</button>
+          <button class="btn2" onclick="clearColumnBoxes()">تفريغ الخانات</button>
+          <button class="btnRed" onclick="clearItems()">مسح الأصناف والبدء من جديد</button>
+        </div>
+        <div id="importMsg"></div>
+      </div>
+
+      <div class="card col-12">
+        <h2>طريقة النسخ من Excel</h2>
+        <p class="small">
+          من Excel: اضغط على عنوان عمود الباركود أو ظلل بيانات الباركود فقط ثم Ctrl+C والصقها في خانة الباركود. كرر نفس الشيء للاسم، التكلفة، الكمية، الوحدة.
+          لازم يكون عدد الأسطر في الباركود والاسم متساوي. التكلفة والكمية والوحدة إذا نقصت أسطرها سيتم وضع 0 أو فراغ.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <section id="page-scan" class="page noPrint">
+    <div class="grid">
+      <div class="card col-7">
+        <h2>قراءة الباركود بالكاميرا</h2>
+        <div class="toolbar"><button class="btnGreen" onclick="startScanner()">تشغيل الكاميرا الاحترافية</button><button class="btnBlue" onclick="startShelfQrScanner()">قراءة QR الرف</button><button class="btnBlue" onclick="startScanner('zxing')">وضع بديل</button><button class="btnRed" onclick="stopScanner()">إيقاف الكاميرا</button><button class="btn2" onclick="toggleTorch()">تشغيل / إيقاف الفلاش</button></div>
+        <div class="scanTip">مهم: الباركود الخطي يحتاج إضاءة قوية. خله أفقي داخل الإطار الذهبي، والمسافة الأفضل 10 إلى 20 سم.</div>
+        <div id="scannerShell" class="scannerShell">
+          <div id="quaggaReader" class="hide"></div>
+          <video id="nativeVideo" class="hide" playsinline muted style="width:100%;min-height:320px;background:#000"></video>
+          <div class="scanTarget"></div>
+          <div class="scannerHint">وجّه الكاميرا على الباركود حتى تسمع صوت القراءة</div>
+        </div>
+        <label>أو اقرأ بجهاز الباركود / أدخل يدويًا</label>
+        <div class="row"><input id="manualBarcode" placeholder="وجّه قارئ الباركود هنا أو اكتب الباركود" autocomplete="off" inputmode="numeric" oninput="handleBarcodeInput(this.value)" onkeydown="handleBarcodeKey(event)"><button onclick="findItem(document.getElementById('manualBarcode').value)">بحث</button></div>
+        <p class="small">للقارئ الخارجي: اضغط داخل الخانة مرة واحدة، ثم اقرأ الباركود. إذا القارئ يرسل Enter سيبحث مباشرة.</p>
+        <div id="scanMsg"></div>
+      </div>
+      <div class="card col-5">
+        <h2>بيانات الصنف</h2>
+        <div class="resultBox" id="itemBox"><p class="muted">اقرأ الباركود أو ابحث يدويًا لظهور بيانات الصنف هنا.</p></div>
+        <form id="countForm" class="hide" onsubmit="saveCount(event)">
+          <input type="hidden" id="barcode">
+          <label>الكمية الفعلية من الطبيعة</label>
+          <input id="actualQty" type="number" step="0.001" placeholder="اكتب الكمية الفعلية" required>
+          <label>ملاحظات</label>
+          <input id="notes" placeholder="اختياري">
+          <div class="toolbar"><button class="btnGreen" type="submit">حفظ الجرد</button><button class="btn2" type="button" onclick="resetCurrent()">إلغاء</button></div>
+        </form>
+      </div>
+    </div>
+  </section>
+
+  <section id="page-items" class="page noPrint">
+    <div class="card">
+      <h2>الأصناف المستوردة</h2>
+      <input id="searchItems" placeholder="بحث بالاسم أو الباركود" oninput="renderItemsTable()">
+      <div class="tableWrap"><table><thead><tr><th>الباركود</th><th>الصنف</th><th>كمية النظام</th><th>الوحدة</th><th>التكلفة</th></tr></thead><tbody id="itemsTbody"></tbody></table></div>
+    </div>
+  </section>
+
+
+  <section id="page-track" class="page noPrint" data-manager-only="1">
+    <div class="card">
+      <h2>🔎 تتبع الصنف في الجرد</h2>
+      <p class="small">خاص بالمدير: امسح الباركود بقارئ الباركود، أو اكتبه، أو ابحث باسم الصنف لعرض تاريخ جرده كاملًا في كل الجردات المغلقة والجرد الحالي.</p>
+      <div class="trackSearchBox">
+        <div>
+          <label>الباركود أو اسم الصنف</label>
+          <input id="trackQuery" placeholder="اكتب الباركود أو اسم الصنف" autocomplete="off" oninput="trackLiveSearch()" onkeydown="trackKey(event)">
+        </div>
+        <button class="btnBlue" onclick="searchItemHistory()">بحث</button>
+        <button class="btnGreen" onclick="printItemHistory()">طباعة PDF</button>
+        <button class="btn2" onclick="clearTrackSearch()">مسح</button>
+      </div>
+      <div id="trackSuggestions" class="trackSuggestions"></div>
+      <div id="trackResults" class="resultBox"><p class="muted">ابدأ بالبحث عن صنف لعرض سجله التاريخي.</p></div>
+    </div>
+  </section>
+
+  <section id="page-report" class="page">
+    <div class="card printCard">
+      <div class="printOnly"><h1>تقرير جرد أسواق سنابل المع</h1><p>اسم الجارد: <span id="printUserName"></span></p><p>تاريخ الطباعة: <span id="printDate"></span></p></div>
+      <h2>تقرير الجرد</h2><p class="small noPrint">زر تصدير سمارت CSV يصدر فقط الأصناف التي فيها فرق جرد: النقص سالب والزيادة موجب.</p>
+      <div class="toolbar noPrint"><button class="btnGreen" onclick="closeInventorySession()">إغلاق الجرد الحالي</button><input id="searchCounts" placeholder="بحث في تقرير الجرد" oninput="renderInventoryTable()"><button class="btnGreen" data-manager-only="1" onclick="exportSmartCSV()">تصدير سمارت CSV</button><button class="btnRed" onclick="clearInventory()">مسح تقرير الجرد</button></div>
+      <div class="tableWrap"><table><thead><tr><th>التاريخ والوقت</th><th>الجارد</th><th>الرف</th><th>الباركود</th><th>الصنف</th><th>كمية النظام</th><th>الكمية الفعلية</th><th>الفرق</th><th>الوحدة</th><th>التكلفة</th><th>إجمالي التكلفة</th><th>ملاحظات</th></tr></thead><tbody id="inventoryTbody"></tbody></table></div>
+    </div>
+  </section>
+
+
+  <section id="page-shelves" class="page noPrint" data-manager-only="1">
+    <div class="card">
+      <h2>🏷️ ترقيم الرفوف وطباعة QR</h2>
+      <p class="small">أنشئ رفوف مرقمة تلقائيًا، ثم اطبع QR لكل رف. عند بداية الجرد اختر الرف أو امسح QR الخاص به حتى تعرف أن الجرد تابع لهذا الرف.</p>
+      <div class="grid">
+        <div class="card col-4">
+          <label>بداية الترقيم</label>
+          <input id="shelfStart" type="number" value="1" min="1">
+          <label>عدد الرفوف</label>
+          <input id="shelfCount" type="number" value="10" min="1">
+          <label>اسم/بادئة الرف</label>
+          <input id="shelfPrefix" value="رف">
+          <div class="toolbar">
+            <button class="btnGreen" onclick="generateShelves()">إنشاء الرفوف</button>
+            <button class="btnBlue" onclick="printShelvesQR()">طباعة كل QR</button>
+            <button class="btnRed" onclick="clearShelves()">مسح الرفوف</button>
+          </div>
+          <div id="shelfMsg"></div>
+          <div class="resultBox">الرف الحالي: <b id="currentShelfLabel">لم يتم اختيار رف</b></div>
+        </div>
+        <div class="card col-8">
+          <h2>قائمة الرفوف</h2>
+          <div class="tableWrap">
+            <table>
+              <thead><tr><th>رقم الرف</th><th>كود QR</th><th>الإجراءات</th></tr></thead>
+              <tbody id="shelvesTbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="page-sessions" class="page noPrint">
+    <div class="card">
+      <h2>الجرد المغلق / الأرشيف</h2>
+      <p class="small">بعد إغلاق الجرد ينتقل هنا برقم متسلسل وتاريخ ووقت الإغلاق. تقدر تختار أي جرد وتصدره Excel أو CSV سمارت أو CSV عادي.</p>
+      <div class="toolbar">
+        <select id="sessionSelect" onchange="renderSessionDetails()"></select>
+        <button class="btnBlue" onclick="exportSelectedSessionExcel()">تصدير الجرد المحدد Excel</button>
+        <button class="btnGreen" onclick="exportSelectedSessionPDF()">PDF</button>
+        <button class="btnGreen" onclick="exportSelectedSessionSmartCSV()">تصدير الجرد المحدد سمارت CSV</button>
+        <button class="btn2" onclick="exportSelectedSessionCSV()">CSV</button>
+        <button class="btnGreen" data-manager-only="1" onclick="approveSelectedSession()">اعتماد الجرد المحدد</button>
+        <button class="btnRed" data-manager-only="1" onclick="deleteSelectedSession()">حذف الجرد المحدد</button>
+      </div>
+      <div id="sessionSummary" class="resultBox"><p class="muted">اختر جرد مغلق لعرض تفاصيله.</p></div>
+      <div class="tableWrap"><table><thead><tr><th>التاريخ والوقت</th><th>الجارد</th><th>الرف</th><th>الباركود</th><th>الصنف</th><th>كمية النظام</th><th>الكمية الفعلية</th><th>الفرق</th><th>الوحدة</th><th>التكلفة</th><th>إجمالي التكلفة</th><th>ملاحظات</th></tr></thead><tbody id="sessionTbody"></tbody></table></div>
+    </div>
+  </section>
+
+</main>
+<nav class="mobileTabs noPrint">
+  <button class="navBtn active" data-page="home" data-perm="home" onclick="showPage('home')"><span>🏠</span><span>الرئيسية</span></button>
+  <button class="navBtn" data-page="import" data-perm="import" onclick="showPage('import')"><span>📥</span><span>استيراد</span></button>
+  <button class="navBtn" data-page="scan" data-perm="scan" onclick="showPage('scan')"><span>📷</span><span>الجرد</span></button>
+  <button class="navBtn" data-page="items" data-perm="items" onclick="showPage('items')"><span>📦</span><span>الأصناف</span></button>
+  <button class="navBtn" data-page="track" data-perm="track" onclick="showPage('track')"><span>🔎</span><span>تتبع</span></button>
+  <button class="navBtn" data-page="report" data-perm="report" onclick="showPage('report')"><span>📊</span><span>التقرير</span></button>
+  <button class="navBtn" data-page="shelves" data-perm="shelves" onclick="showPage('shelves')"><span>🏷️</span><span>الرفوف</span></button>
+  <button class="navBtn" data-page="sessions" data-perm="sessions" onclick="showPage('sessions')"><span>🗂️</span><span>المغلق</span></button>
+</nav>
+<script>
+
+function safeJSON(key, fallback){
+  try{
+    return JSON.parse(localStorage.getItem(key) || fallback);
+  }catch(e){
+    try{ localStorage.removeItem(key); }catch(_){}
+    try{ return JSON.parse(fallback); }catch(_){ return null; }
+  }
+}
+function safeSet(key, value){
+  try{
+    localStorage.setItem(key, value);
+    return true;
+  }catch(e){
+    console.warn('تعذر الحفظ المحلي', key, e);
+    return false;
+  }
+}
+
+let items = safeJSON('sanabel_items','[]') || [];
+let itemsMain = safeJSON('sanabel_items_main','null');
+let itemsOther = safeJSON('sanabel_items_other','null');
+if(!Array.isArray(itemsMain)) itemsMain = Array.isArray(items)&&items.length ? items.map(x=>({...x,source:x.source||'الوحدة الرئيسية'})) : [];
+if(!Array.isArray(itemsOther)) itemsOther = [];
+function rebuildItems(){
+  items=[...(itemsMain||[]).map(x=>({...x,source:x.source||'الوحدة الرئيسية'})),...(itemsOther||[]).map(x=>({...x,source:x.source||'الوحدات الأخرى'}))];
+  safeSet('sanabel_items',JSON.stringify(items));
+  localStorage.setItem('sanabel_items_main',JSON.stringify(itemsMain||[]));
+  localStorage.setItem('sanabel_items_other',JSON.stringify(itemsOther||[]));
+}
+rebuildItems();
+let inventory = safeJSON('sanabel_inventory','[]') || [];
+let sessions = safeJSON('sanabel_sessions','[]') || [];
+let importHistory = safeJSON('sanabel_import_history','[]') || [];
+let users = safeJSON('sanabel_users','[{"name":"ابوقصي","pin":"1234","role":"مدير"}]') || [{name:'ابوقصي',pin:'1234',role:'مدير'}];
+let currentUser = ''; // فتح الرابط يبدأ دائمًا من صفحة الدخول
+
+function getCurrentUserObj(){
+  normalizeUsers();
+  return users.find(u=>u.name===currentUser) || null;
+}
+function isAdmin(){
+  const u=getCurrentUserObj();
+  return !!u && (u.role==='مدير' || u.role==='admin');
+}
+function allowedPagesForCurrentUser(){
+  return isAdmin() ? ['home','import','scan','items','track','report','shelves','sessions'] : ['home','scan'];
+}
+function canOpenPage(name){
+  return allowedPagesForCurrentUser().includes(name);
+}
+function applyRolePermissions(){
+  const admin=isAdmin();
+  document.querySelectorAll('[data-manager-only="1"]').forEach(el=>el.classList.toggle('permHidden',!admin));
+  document.querySelectorAll('[data-perm]').forEach(el=>{
+    const perm=el.getAttribute('data-perm');
+    let show=true;
+    if(!admin && !['home','scan','close'].includes(perm)) show=false;
+    el.classList.toggle('permHidden',!show);
+  });
+  const box=document.getElementById('settingsUsersBox');
+  if(box) box.classList.toggle('show',admin);
+  const notice=document.getElementById('pendingAdminNotice');
+  if(notice && !admin){notice.classList.remove('show'); notice.innerHTML='';}
+}
+
+
+/* Firebase Realtime Database Sync */
+const firebaseConfig = {
+  apiKey: "AIzaSyASlc6u76CtrnDI117qRrTGBVEAirUMcw4",
+  authDomain: "sanabel-inventory.firebaseapp.com",
+  databaseURL: "https://sanabel-inventory-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "sanabel-inventory",
+  storageBucket: "sanabel-inventory.firebasestorage.app",
+  messagingSenderId: "507394991802",
+  appId: "1:507394991802:web:c740e4bd8f553d4e65c483",
+  measurementId: "G-K1VK5505MN"
+};
+let db=null;
+let cloudReady=false;
+let cloudApplying=false;
+let seenPendingSessionIds=safeJSON('sanabel_seen_pending_sessions','[]') || [];
+function setCloudStatus(text, ok=true){
+  const el=document.getElementById('cloudStatus');
+  if(!el)return;
+  el.textContent=text;
+  el.classList.remove('okCloud','badCloud');
+  el.classList.add(ok?'okCloud':'badCloud');
+}
+function initCloud(){
+  try{
+    if(!firebase.apps.length) firebase.initializeApp(firebaseConfig);
+    db=firebase.database();
+    cloudReady=true;
+    setCloudStatus('☁️ متصل سحابيًا',true);
+    setupCloudSync();
+  }catch(e){
+    console.error(e);
+    cloudReady=false;
+    setCloudStatus('☁️ غير متصل',false);
+  }
+}
+function cloudSet(path,data){
+  if(!cloudReady||!db||cloudApplying)return Promise.resolve();
+  return db.ref('sanabelInventory/'+path).set(data).then(()=>setCloudStatus('☁️ متصل سحابيًا',true)).catch(err=>{
+    console.error(err); setCloudStatus('☁️ فشل الحفظ',false);
+  });
+}
+function syncInventoryCloud(){
+  if(!cloudReady||!db||cloudApplying)return Promise.resolve();
+  return db.ref('sanabelInventory').update({
+    inventory: inventory || [],
+    sessions: sessions || [],
+    users: users || [],
+    importHistory: importHistory || [],
+    itemsMain: itemsMain || [],
+    itemsOther: itemsOther || []
+  }).then(()=>setCloudStatus('☁️ تم الحفظ السحابي',true)).catch(err=>{
+    console.error(err); setCloudStatus('☁️ فشل الحفظ السحابي',false);
+  });
+}
+function syncItemsCloud(){
+  if(!cloudReady||!db||cloudApplying)return Promise.resolve();
+  return db.ref('sanabelInventory').update({
+    items: items || [],
+    itemsMain: itemsMain || [],
+    itemsOther: itemsOther || [],
+    importHistory: importHistory || [],
+    users: users || []
+  }).then(()=>setCloudStatus('☁️ تم رفع الأصناف',true)).catch(err=>{
+    console.error(err); setCloudStatus('☁️ فشل رفع الأصناف',false);
+  });
+}
+function cloudMergeLocalIfEmpty(path,localData){
+  if(!cloudReady||!db)return;
+  db.ref('sanabelInventory/'+path).once('value').then(snap=>{
+    const v=snap.val();
+    const hasCloud=Array.isArray(v)?v.length>0:!!v;
+    const hasLocal=Array.isArray(localData)?localData.length>0:!!localData;
+    if(!hasCloud && hasLocal) return cloudSet(path,localData);
+  }).catch(()=>{});
+}
+function setupCloudSync(){
+  cloudMergeLocalIfEmpty('items',items);
+  cloudMergeLocalIfEmpty('itemsMain',itemsMain);
+  cloudMergeLocalIfEmpty('itemsOther',itemsOther);
+  cloudMergeLocalIfEmpty('inventory',inventory);
+  cloudMergeLocalIfEmpty('sessions',sessions);
+  cloudMergeLocalIfEmpty('importHistory',importHistory);
+  cloudMergeLocalIfEmpty('users',users);
+
+  db.ref('sanabelInventory/items').on('value',snap=>{
+    const v=snap.val();
+    if(!Array.isArray(v))return;
+    cloudApplying=true; items=v;
+    safeSet('sanabel_items',JSON.stringify(items));
+    renderItemsTable(); updateKpis(); cloudApplying=false;
+  });
+  db.ref('sanabelInventory/inventory').on('value',snap=>{
+    const v=snap.val();
+    inventory=Array.isArray(v)?v:[];
+    cloudApplying=true; safeSet('sanabel_inventory',JSON.stringify(inventory));
+    renderInventoryTable(); updateKpis(); cloudApplying=false;
+  });
+  db.ref('sanabelInventory/sessions').on('value',snap=>{
+    const v=snap.val();
+    sessions=Array.isArray(v)?v:[];
+    cloudApplying=true; safeSet('sanabel_sessions',JSON.stringify(sessions));
+    renderSessionsList(); renderSessionDetails(); updateKpis(); checkPendingSessionsNotice();
+    cloudApplying=false;
+  });
+  db.ref('sanabelInventory/itemsMain').on('value',snap=>{
+    const v=snap.val();
+    if(!Array.isArray(v))return;
+    cloudApplying=true; itemsMain=v; rebuildItems();
+    renderItemsTable(); updateKpis(); cloudApplying=false;
+  });
+  db.ref('sanabelInventory/itemsOther').on('value',snap=>{
+    const v=snap.val();
+    if(!Array.isArray(v))return;
+    cloudApplying=true; itemsOther=v; rebuildItems();
+    renderItemsTable(); updateKpis(); cloudApplying=false;
+  });
+  db.ref('sanabelInventory/importHistory').on('value',snap=>{
+    const v=snap.val(); importHistory=Array.isArray(v)?v:[];
+    safeSet('sanabel_import_history',JSON.stringify(importHistory));
+  });
+  db.ref('sanabelInventory/users').on('value',snap=>{
+    const v=snap.val();
+    if(!Array.isArray(v))return;
+    users=v; cloudApplying=true;
+    safeSet('sanabel_users',JSON.stringify(users));
+    normalizeUsers(); renderUsers(); renderUsersManage(); applyRolePermissions(); cloudApplying=false;
+  });
+}
+
+
+let inventoryStartedAt = localStorage.getItem('sanabel_inventory_started_at') || '';
+function ensureInventoryStarted(){
+  if(!inventoryStartedAt){
+    inventoryStartedAt = new Date().toISOString();
+    localStorage.setItem('sanabel_inventory_started_at', inventoryStartedAt);
+  }
+}
+function formatDuration(ms){
+  ms = Math.max(0, Number(ms)||0);
+  const total = Math.floor(ms/1000);
+  const h = Math.floor(total/3600);
+  const m = Math.floor((total%3600)/60);
+  const s = total%60;
+  return String(h).padStart(2,'0') + ':' + String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0');
+}
+function calcInventoryDuration(records, session){
+  try{
+    if(session && session.durationText) return session.durationText;
+    const end = session && (session.closedAt || session.date || session.createdAt) ? new Date(session.closedAt || session.date || session.createdAt).getTime() : Date.now();
+    let start = session && session.startedAt ? new Date(session.startedAt).getTime() : 0;
+    if(!start && Array.isArray(records) && records.length){
+      const times = records.map(r=>new Date(r.createdAt||r.date||r.time||0).getTime()).filter(Boolean);
+      if(times.length) start = Math.min(...times);
+    }
+    if(!start && inventoryStartedAt) start = new Date(inventoryStartedAt).getTime();
+    if(!start) return '00:00:00';
+    return formatDuration(end - start);
+  }catch(e){ return '00:00:00'; }
+}
+
+let currentItem = null; let scanner = null; let lastScan = ''; let barcodeInputTimer=null; let nativeStream=null; let nativeBarcodeDetector=null; let nativeScanLoop=false; let zxingReader=null; let quaggaRunning=false; let scanHits={};
+
+
+function playBeep(){
+  try{
+    const AudioCtx=window.AudioContext||window.webkitAudioContext;
+    const ctx=new AudioCtx();
+    const osc=ctx.createOscillator();
+    const gain=ctx.createGain();
+    osc.frequency.value=1000;
+    gain.gain.setValueAtTime(0.001,ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.35,ctx.currentTime+0.02);
+    gain.gain.exponentialRampToValueAtTime(0.001,ctx.currentTime+0.18);
+    osc.connect(gain); gain.connect(ctx.destination);
+    osc.start(); osc.stop(ctx.currentTime+0.2);
+  }catch(e){}
+}
+function markScanOk(){
+  playBeep();
+  try{navigator.vibrate&&navigator.vibrate(90)}catch(e){}
+  const shell=document.getElementById('scannerShell');
+  if(shell){shell.classList.add('beepFlash'); setTimeout(()=>shell.classList.remove('beepFlash'),500);}
+}
+function handleBarcodeInput(value){
+  clearTimeout(barcodeInputTimer);
+  const code=String(value||'').trim();
+  if(code.length>=6) barcodeInputTimer=setTimeout(()=>findItem(code),220);
+}
+function handleBarcodeKey(event){
+  if(event.key==='Enter'){
+    event.preventDefault();
+    clearTimeout(barcodeInputTimer);
+    findItem(event.target.value);
+  }
+}
+function acceptScannedCode(text){
+  text=String(text||'').replace(/\s/g,'').trim();
+  if(!text || text.length<6 || text===lastScan)return;
+  scanHits[text]=(scanHits[text]||0)+1;
+  if(scanHits[text]<2){
+    setTimeout(()=>{scanHits[text]=0},900);
+    return;
+  }
+  scanHits={};
+  lastScan=text;
+  document.getElementById('manualBarcode').value=text;
+  findItem(text);
+  setTimeout(()=>lastScan='',1700);
+}
+
+
+function appConfirm(title,message,yesText='نعم',noText='إلغاء'){
+  return new Promise(resolve=>{
+    const overlay=document.getElementById('appModalOverlay'), titleEl=document.getElementById('appModalTitle'), msgEl=document.getElementById('appModalMessage'), yes=document.getElementById('appModalYes'), no=document.getElementById('appModalNo');
+    if(!overlay||!titleEl||!msgEl||!yes||!no){resolve(true);return;}
+    titleEl.textContent=title; msgEl.innerHTML=message; yes.textContent=yesText; no.textContent=noText; no.style.display='';
+    overlay.classList.add('show');
+    const done=(v)=>{overlay.classList.remove('show'); yes.onclick=null; no.onclick=null; resolve(v);};
+    yes.onclick=()=>done(true); no.onclick=()=>done(false);
+  });
+}
+function appNotice(title,message,okText='تمام'){
+  return new Promise(resolve=>{
+    const overlay=document.getElementById('appModalOverlay'), titleEl=document.getElementById('appModalTitle'), msgEl=document.getElementById('appModalMessage'), yes=document.getElementById('appModalYes'), no=document.getElementById('appModalNo');
+    if(!overlay||!titleEl||!msgEl||!yes||!no){resolve();return;}
+    titleEl.textContent=title; msgEl.innerHTML=message; yes.textContent=okText; no.style.display='none';
+    overlay.classList.add('show');
+    yes.onclick=()=>{overlay.classList.remove('show'); yes.onclick=null; no.style.display=''; resolve();};
+  });
+}
+
+
+
+function normalizeUsers(){
+  if(!Array.isArray(users)) users=[];
+  users=users.map(u=> typeof u==='string' ? {name:u,pin:'1234',role:'موظف جرد'} : u).filter(u=>u && u.name);
+  const rest=users.filter(u=>u.name!=='ابوقصي');
+  users=[{name:'ابوقصي',pin:'1234',role:'مدير'}, ...rest];
+  users.forEach((u,idx)=>{ 
+    if(!u.role) u.role=idx===0?'مدير':'موظف جرد'; 
+    if(u.role==='مستخدم') u.role='موظف جرد'; 
+  });
+  users[0].role='مدير';
+  users[0].pin='1234';
+}
+function saveUsers(){
+  normalizeUsers();
+  safeSet('sanabel_users',JSON.stringify(users));
+  safeSet('sanabel_current_user',currentUser||'');
+  cloudSet('users',users);
+}
+function renderUsers(){
+  normalizeUsers();
+  const active=document.getElementById('activeUserName');
+  if(active) active.textContent=currentUser || 'لم يتم الدخول';
+  const panel=document.getElementById('usersPanelBody');
+  if(panel){
+    panel.innerHTML='';
+    users.forEach((u,idx)=>{panel.innerHTML+=`<tr><td>${esc(u.name)}</td><td>${esc(u.role||'مستخدم')}</td><td>${idx===0?'المدير الأساسي':'-'}</td></tr>`;});
+  }
+}
+function setCurrentUser(name){
+  currentUser=String(name||'').trim();
+  saveUsers();
+  renderUsers();renderUsersManage();
+  renderInventoryTable();
+  renderSessionsList();
+  applyRolePermissions();
+}
+function addUser(){
+  normalizeUsers();
+  const name=String(document.getElementById('newUserName')?.value||'').trim();
+  const pin=String(document.getElementById('newUserPin')?.value||'').trim();
+  if(!name || !pin){appNotice('تنبيه','اكتب اسم المستخدم والرقم السري.');return;}
+  if(users.some(u=>u.name===name)){appNotice('تنبيه','اسم المستخدم موجود سابقًا.');return;}
+  if(users.some(u=>String(u.pin)===pin)){appNotice('تنبيه','هذا الرقم السري مستخدم مع شخص آخر.');return;}
+  const role=String(document.getElementById('newUserRole')?.value||'موظف جرد').trim();
+  users.push({name,pin,role});
+  document.getElementById('newUserName').value='';
+  document.getElementById('newUserPin').value='';
+  saveUsers();
+  renderUsers();
+  appNotice('تمت الإضافة',`تم إضافة المستخدم <b>${esc(name)}</b>.`);
+}
+
+function loginByPin(){
+  const pin=String(document.getElementById('pinInput')?.value||'').trim();
+
+  if(pin==='1234'){
+    try{
+      users = Array.isArray(users) ? users : [];
+      const admin = {name:'ابوقصي', pin:'1234', role:'مدير'};
+      users = [admin, ...users.filter(u=>u && u.name && u.name !== 'ابوقصي')];
+      currentUser = 'ابوقصي';
+    }catch(e){
+      users=[{name:'ابوقصي',pin:'1234',role:'مدير'}];
+      currentUser='ابوقصي';
+    }
+
+    document.body.classList.remove('login-first');
+    document.getElementById('loginOverlay')?.classList.remove('show');
+
+    const pinInput=document.getElementById('pinInput');
+    if(pinInput) pinInput.value='';
+
+    const loginMsg=document.getElementById('loginMsg');
+    if(loginMsg) loginMsg.innerHTML='';
+
+    try{ safeSet('sanabel_users', JSON.stringify(users)); }catch(e){}
+    try{ safeSet('sanabel_current_user', currentUser); }catch(e){}
+
+    try{ renderUsers(); }catch(e){}
+    try{ renderUsersManage(); }catch(e){}
+    try{ renderItemsTable(); }catch(e){}
+    try{ renderInventoryTable(); }catch(e){}
+    try{ renderSessionsList(); }catch(e){}
+    try{ updateKpis(); }catch(e){}
+    try{ applyRolePermissions(); }catch(e){}
+    try{ showPage('home'); }catch(e){}
+    try{ setTimeout(()=>cloudSet('users',users),700); }catch(e){}
+    return;
+  }
+
+  normalizeUsers();
+  const user=users.find(u=>String(u.pin)===pin);
+  if(!user){
+    const msg=document.getElementById('loginMsg');
+    if(msg) msg.innerHTML='<div class="warn">الرقم السري غير صحيح.</div>';
+    return;
+  }
+
+  currentUser=user.name;
+  try{ safeSet('sanabel_current_user',currentUser||''); }catch(e){}
+
+  document.body.classList.remove('login-first');
+  document.getElementById('loginOverlay')?.classList.remove('show');
+
+  const pinInput=document.getElementById('pinInput');
+  if(pinInput) pinInput.value='';
+
+  const loginMsg=document.getElementById('loginMsg');
+  if(loginMsg) loginMsg.innerHTML='';
+
+  renderUsers();
+  renderUsersManage();
+  renderInventoryTable();
+  renderSessionsList();
+  applyRolePermissions();
+
+  if(isAdmin()) showPage('home');
+  else showPage('scan');
+
+  checkPendingSessionsNotice();
+}
+function logoutUser(){
+  try{
+    if(!isAdmin() && Array.isArray(inventory) && inventory.length>0){
+      appNotice('يوجد جرد مفتوح','يوجد جرد مفتوح لم يتم إغلاقه. أغلق الجرد المفتوح أولًا ثم اضغط خروج.');
+      return;
+    }
+  }catch(e){}
+  currentUser='';
+  saveUsers();
+  applyRolePermissions();
+  document.body.classList.add('login-first');
+  document.getElementById('loginOverlay')?.classList.add('show');
+  setTimeout(()=>document.getElementById('pinInput')?.focus(),150);
+}
+
+function renderUsersManage(){
+  const body=document.getElementById('usersManageBody');
+  if(!body)return;
+  normalizeUsers();
+  body.innerHTML='';
+  users.forEach((u,idx)=>{
+    body.innerHTML+=`
+    <tr>
+      <td><input value="${esc(u.name)}" onchange="updateUser(${idx},'name',this.value)"></td>
+      <td><input value="${esc(u.pin)}" onchange="updateUser(${idx},'pin',this.value)"></td>
+      <td><select onchange="updateUser(${idx},'role',this.value)" ${idx===0?'disabled':''}>
+        <option value="مدير" ${(u.role==='مدير')?'selected':''}>مدير</option>
+        <option value="موظف جرد" ${(u.role!=='مدير')?'selected':''}>موظف جرد</option>
+      </select></td>
+      <td><div class="actions">
+        <button class="btnBlue" onclick="saveUsers();renderUsers();renderUsersManage();applyRolePermissions();appNotice('تم الحفظ','تم تحديث بيانات المستخدم ومزامنتها فورياً.')">حفظ</button>
+        ${idx===0 ? '<span class="small">المدير الأساسي</span>' : `<button class="btnRed" onclick="deleteUser(${idx})">حذف</button>`}
+      </div></td>
+    </tr>`;
+  });
+}
+function updateUser(index,key,val){
+  if(!users[index]) return;
+  if(index===0 && key==='role'){users[index].role='مدير';return;}
+  users[index][key]=String(val||'').trim();
+}
+function deleteUser(index){
+  if(index===0){appNotice('تنبيه','لا يمكن حذف المدير الأساسي.');return;}
+  const removed=users[index]?.name||'';
+  users.splice(index,1);
+  if(currentUser===removed){ currentUser=''; logoutUser(); }
+  saveUsers(); renderUsers(); renderUsersManage();
+}
+
+function requireLogin(){
+  normalizeUsers();
+  renderUsers();
+  if(!currentUser || !users.some(u=>u.name===currentUser)){
+    currentUser='';
+    safeSet('sanabel_current_user','');
+    document.body.classList.add('login-first');
+    document.getElementById('loginOverlay')?.classList.add('show');
+    setTimeout(()=>document.getElementById('pinInput')?.focus(),150);
+  }else{
+    document.body.classList.remove('login-first');
+  }
+}
+function userNameOf(r){return r?.userName || r?.user || '-';}
+
+
+
+
+
+
+const uiDict = {
+  en: {
+    "تطبيق جرد أسواق سنابل المع":"Sanabel Almaa Inventory App",
+    "نسخة مرتبة للجوال والكمبيوتر":"Mobile & desktop version",
+    "الرئيسية":"Home","استيراد":"Import","الجرد":"Inventory","الأصناف":"Items","التقرير":"Report","الجرد المغلق":"Closed Inventory","المغلق":"Closed",
+    "الإعدادات":"Settings","إغلاق الجرد":"Close Inventory","طباعة / PDF":"Print / PDF","تصدير Excel":"Export Excel","تصدير سمارت CSV":"Smart CSV","CSV":"CSV",
+    "الجارد":"User","اللغة":"Language","إضافة مستخدم":"Add User","تسجيل خروج":"Logout","اسم مستخدم جديد":"New user name","رقم سري":"PIN",
+    "لوحة جرد سنابل المع":"Sanabel Inventory Dashboard",
+    "اختر القسم المطلوب من الأيقونات. تأكد من اختيار اسم المستخدم قبل الجرد حتى يظهر اسم الجارد في التقرير والجرد المغلق والطباعة.":"Choose a section. Select the user before counting so the user name appears in reports, closed inventory, and printing.",
+    "ابدأ باستيراد الأصناف":"Start importing items","ابدأ الجرد بالكاميرا":"Start camera inventory",
+    "استيراد الأصناف":"Import Items","Excel / CSV":"Excel / CSV","الجرد بالكاميرا":"Camera Inventory","قراءة الباركود":"Barcode scan",
+    "بحث ومراجعة":"Search & review","تقرير الجرد الحالي":"Current inventory report","طباعة وتصدير":"Print & export","جرد رقم 1، 2، 3":"Inventory 1, 2, 3",
+    "عدد الأصناف المستوردة":"Imported items","عدد الأصناف المجردة":"Counted items","إجمالي فرق الجرد":"Total difference","آخر جرد":"Last count",
+    "استيراد / تحديث ملف الأصناف":"Import / update items file",
+    "الأعمدة المقبولة تلقائيًا: الباركود / barcode، اسم الصنف / item، الكمية / qty، الوحدة / unit. يمكن أن تكون بالعربي أو الإنجليزي.":"Accepted columns: barcode, item name, quantity, and unit. Arabic or English headers are supported.",
+    "تحميل نموذج Excel":"Download Excel template","مسح الأصناف":"Clear items","طريقة تجهيز الملف":"File preparation",
+    "أفضل ترتيب للأعمدة: الباركود، اسم الصنف، الكمية، الوحدة. عند استيراد ملف جديد يتم استبدال الأصناف السابقة؛ لأن آخر ملف هو المعتمد. وإذا كان نفس الملف مستورد سابقًا يظهر لك تنبيه قبل التكرار.":"Best column order: barcode, item name, quantity, unit. A new import replaces the previous items file. If the same file was imported before, you will see a warning.",
+    "التطبيق يحفظ البيانات داخل الجهاز الحالي، ومناسب للتجربة السريعة على الجوال أو الكمبيوتر.":"Data is stored on this device unless cloud sync is enabled.",
+    "إدارة المستخدمين":"User Management","المستخدمون المسجلون":"Registered Users","الاسم":"Name","الدور":"Role","ملاحظة":"Note","الإجراءات":"Actions","الرقم السري":"PIN",
+    "قراءة الباركود بالكاميرا":"Barcode scanning with camera","تشغيل الكاميرا الاحترافية":"Start professional camera","وضع بديل":"Alternative mode","إيقاف الكاميرا":"Stop camera",
+    "مهم: الباركود الخطي يحتاج إضاءة قوية. خله أفقي داخل الإطار الذهبي، والمسافة الأفضل 10 إلى 20 سم.":"Tip: linear barcodes need good light. Keep it horizontal inside the gold frame, 10–20 cm away.",
+    "وجّه الكاميرا على الباركود حتى تسمع صوت القراءة":"Point camera at barcode until you hear the scan sound",
+    "أو اقرأ بجهاز الباركود / أدخل يدويًا":"Use barcode scanner / enter manually",
+    "للقارئ الخارجي: اضغط داخل الخانة مرة واحدة، ثم اقرأ الباركود. إذا القارئ يرسل Enter سيبحث مباشرة.":"For external scanners: tap the field once, then scan. If the scanner sends Enter, it will search automatically.",
+    "بيانات الصنف":"Item details","اقرأ الباركود أو ابحث يدويًا لظهور بيانات الصنف هنا.":"Scan or search manually to show item details here.",
+    "الكمية الفعلية من الطبيعة":"Actual counted quantity","ملاحظات":"Notes","حفظ الجرد":"Save count","إلغاء":"Cancel",
+    "الأصناف المستوردة":"Imported Items","بحث بالاسم أو الباركود":"Search by name or barcode","الباركود":"Barcode","الصنف":"Item","كمية النظام":"System qty","الوحدة":"Unit",
+    "تقرير الجرد":"Inventory Report","زر تصدير سمارت CSV يصدر فقط الأصناف التي فيها فرق جرد: النقص سالب والزيادة موجب.":"Smart CSV exports only items with differences: shortage negative, excess positive.",
+    "إغلاق الجرد الحالي":"Close current inventory","بحث في تقرير الجرد":"Search inventory report","مسح تقرير الجرد":"Clear report",
+    "التاريخ والوقت":"Date & time","المستخدم":"User","الكمية الفعلية":"Actual qty","الفرق":"Difference",
+    "الجرد المغلق / الأرشيف":"Closed Inventory / Archive",
+    "بعد إغلاق الجرد ينتقل هنا برقم متسلسل وتاريخ ووقت الإغلاق. تقدر تختار أي جرد وتصدره Excel أو CSV سمارت أو CSV عادي.":"After closing, inventory is archived here with a serial number and closing time. You can export any selected inventory.",
+    "PDF":"PDF","PDF":"PDF","تصدير الجرد المحدد Excel":"Export selected Excel","تصدير الجرد المحدد سمارت CSV":"Export selected Smart CSV","حذف الجرد المحدد":"Delete selected",
+    "اختر جرد مغلق لعرض تفاصيله.":"Select a closed inventory to view details.",
+    "دخول الجرد":"Inventory Login","أدخل الرقم السري الخاص بك، وسيتم تسجيل اسمك تلقائيًا في الجرد والتقارير.":"Enter your PIN. Your name will be recorded automatically in inventory and reports.",
+    "دخول":"Login","الرقم الافتراضي للمدير أول مرة: 1234":"Default admin PIN first time: 1234",
+    "اسم الجارد":"User name","تاريخ الطباعة":"Print date","تقرير جرد أسواق سنابل المع":"Sanabel Almaa Inventory Report",
+    "تأكيد":"Confirm","نعم":"Yes","تم الحفظ":"Saved","حفظ":"Save","حذف":"Delete","المدير":"Admin","المدير الأساسي":"Main admin"
+  },
+  ur: {
+    "الرئيسية":"ہوم","استيراد":"امپورٹ","الجرد":"گنتی","الأصناف":"اشیاء","التقرير":"رپورٹ","الجرد المغلق":"بند گنتی","المغلق":"بند",
+    "الإعدادات":"ترتیبات","إغلاق الجرد":"گنتی بند کریں","طباعة / PDF":"پرنٹ / PDF","تصدير Excel":"Excel ایکسپورٹ","تصدير سمارت CSV":"Smart CSV ایکسپورٹ",
+    "الجارد":"گنتی کرنے والا","اللغة":"زبان","إضافة مستخدم":"صارف شامل کریں","تسجيل خروج":"لاگ آؤٹ","اسم مستخدم جديد":"نیا صارف","رقم سري":"پن",
+    "لوحة جرد سنابل المع":"سنابل انوینٹری ڈیش بورڈ","ابدأ باستيراد الأصناف":"اشیاء امپورٹ کریں","ابدأ الجرد بالكاميرا":"کیمرہ گنتی شروع کریں",
+    "استيراد الأصناف":"اشیاء امپورٹ","الجرد بالكاميرا":"کیمرہ گنتی","قراءة الباركود":"بارکوڈ پڑھنا","بحث ومراجعة":"تلاش اور جائزہ",
+    "عدد الأصناف المستوردة":"امپورٹ اشیاء","عدد الأصناف المجردة":"گنی ہوئی اشیاء","إجمالي فرق الجرد":"کل فرق","آخر جرد":"آخری گنتی",
+    "استيراد / تحديث ملف الأصناف":"اشیاء فائل امپورٹ/اپڈیٹ","تحميل نموذج Excel":"Excel نمونہ","مسح الأصناف":"اشیاء صاف کریں","طريقة تجهيز الملف":"فائل تیاری",
+    "إدارة المستخدمين":"صارفین کا انتظام","المستخدمون المسجلون":"رجسٹرڈ صارفین","الاسم":"نام","الدور":"کردار","ملاحظة":"نوٹ","الإجراءات":"عمل",
+    "قراءة الباركود بالكاميرا":"کیمرے سے بارکوڈ","تشغيل الكاميرا الاحترافية":"کیمرہ شروع","وضع بديل":"متبادل","إيقاف الكاميرا":"کیمرہ بند",
+    "بيانات الصنف":"آئٹم تفصیل","الكمية الفعلية من الطبيعة":"اصل مقدار","ملاحظات":"نوٹس","حفظ الجرد":"گنتی محفوظ","إلغاء":"منسوخ",
+    "الأصناف المستوردة":"امپورٹ اشیاء","بحث بالاسم أو الباركود":"نام یا بارکوڈ تلاش","الباركود":"بارکوڈ","الصنف":"آئٹم","كمية النظام":"سسٹم مقدار","الوحدة":"یونٹ",
+    "تقرير الجرد":"انوینٹری رپورٹ","إغلاق الجرد الحالي":"موجودہ گنتی بند","بحث في تقرير الجرد":"رپورٹ تلاش","مسح تقرير الجرد":"رپورٹ صاف",
+    "التاريخ والوقت":"تاریخ/وقت","المستخدم":"صارف","الكمية الفعلية":"اصل مقدار","الفرق":"فرق",
+    "الجرد المغلق / الأرشيف":"بند گنتی / آرکائیو","PDF":"PDF","تصدير الجرد المحدد Excel":"منتخب Excel","تصدير الجرد المحدد سمارت CSV":"منتخب Smart CSV","حذف الجرد المحدد":"منتخب حذف",
+    "دخول الجرد":"گنتی لاگ ان","دخول":"لاگ ان","اسم الجارد":"صارف نام","تاريخ الطباعة":"پرنٹ تاریخ","تأكيد":"تصدیق","نعم":"ہاں","حفظ":"محفوظ","حذف":"حذف"
+  },
+  bn: {
+    "الرئيسية":"হোম","استيراد":"ইমপোর্ট","الجرد":"গণনা","الأصناف":"পণ্য","التقرير":"রিপোর্ট","الجرد المغلق":"বন্ধ গণনা","المغلق":"বন্ধ",
+    "الإعدادات":"সেটিংস","إغلاق الجرد":"গণনা বন্ধ","طباعة / PDF":"প্রিন্ট / PDF","تصدير Excel":"Excel এক্সপোর্ট","تصدير سمارت CSV":"Smart CSV এক্সপোর্ট",
+    "الجارد":"গণনাকারী","اللغة":"ভাষা","إضافة مستخدم":"ব্যবহারকারী যোগ","تسجيل خروج":"লগআউট","اسم مستخدم جديد":"নতুন ব্যবহারকারী","رقم سري":"PIN",
+    "لوحة جرد سنابل المع":"সানাবেল ইনভেন্টরি ড্যাশবোর্ড","ابدأ باستيراد الأصناف":"পণ্য ইমপোর্ট শুরু","ابدأ الجرد بالكاميرا":"ক্যামেরা গণনা শুরু",
+    "استيراد الأصناف":"পণ্য ইমপোর্ট","الجرد بالكاميرا":"ক্যামেরা গণনা","قراءة الباركود":"বারকোড স্ক্যান","بحث ومراجعة":"সার্চ ও রিভিউ",
+    "عدد الأصناف المستوردة":"ইমপোর্ট পণ্য","عدد الأصناف المجردة":"গণনা পণ্য","إجمالي فرق الجرد":"মোট পার্থক্য","آخر جرد":"শেষ গণনা",
+    "إدارة المستخدمين":"ব্যবহারকারী ব্যবস্থাপনা","المستخدمون المسجلون":"নিবন্ধিত ব্যবহারকারী","الاسم":"নাম","الدور":"ভূমিকা","ملاحظة":"নোট","الإجراءات":"কাজ",
+    "قراءة الباركود بالكاميرا":"ক্যামেরায় বারকোড","تشغيل الكاميرا الاحترافية":"ক্যামেরা চালু","وضع بديل":"বিকল্প","إيقاف الكاميرا":"ক্যামেরা বন্ধ",
+    "بيانات الصنف":"পণ্যের তথ্য","الكمية الفعلية من الطبيعة":"বাস্তব পরিমাণ","ملاحظات":"নোট","حفظ الجرد":"গণনা সেভ","إلغاء":"বাতিল",
+    "الأصناف المستوردة":"ইমপোর্ট পণ্য","بحث بالاسم أو الباركود":"নাম/বারকোড সার্চ","الباركود":"বারকোড","الصنف":"পণ্য","كمية النظام":"সিস্টেম পরিমাণ","الوحدة":"ইউনিট",
+    "تقرير الجرد":"ইনভেন্টরি রিপোর্ট","إغلاق الجرد الحالي":"বর্তমান গণনা বন্ধ","بحث في تقرير الجرد":"রিপোর্ট সার্চ","مسح تقرير الجرد":"রিপোর্ট মুছুন",
+    "التاريخ والوقت":"তারিখ/সময়","المستخدم":"ব্যবহারকারী","الكمية الفعلية":"বাস্তব পরিমাণ","الفرق":"পার্থক্য",
+    "دخول الجرد":"গণনা লগইন","دخول":"লগইন","اسم الجارد":"ব্যবহারকারীর নাম","تاريخ الطباعة":"প্রিন্ট তারিখ","تأكيد":"নিশ্চিত","نعم":"হ্যাঁ","حفظ":"সেভ","حذف":"মুছুন"
+  },
+  hi: {
+    "الرئيسية":"होम","استيراد":"इम्पोर्ट","الجرد":"गिनती","الأصناف":"आइटम","التقرير":"रिपोर्ट","الجرد المغلق":"बंद गिनती","المغلق":"बंद",
+    "الإعدادات":"सेटिंग्स","إغلاق الجرد":"गिनती बंद करें","طباعة / PDF":"प्रिंट / PDF","تصدير Excel":"Excel एक्सपोर्ट","تصدير سمارت CSV":"Smart CSV एक्सपोर्ट",
+    "الجارد":"गिनती करने वाला","اللغة":"भाषा","إضافة مستخدم":"यूज़र जोड़ें","تسجيل خروج":"लॉगआउट","اسم مستخدم جديد":"नया यूज़र","رقم سري":"PIN",
+    "لوحة جرد سنابل المع":"सनाबेल इन्वेंटरी डैशबोर्ड","ابدأ باستيراد الأصناف":"आइटम इम्पोर्ट करें","ابدأ الجرد بالكاميرا":"कैमरा गिनती शुरू",
+    "استيراد الأصناف":"आइटम इम्पोर्ट","الجرد بالكاميرا":"कैमरा गिनती","قراءة الباركود":"बारकोड स्कैन","بحث ومراجعة":"खोज और समीक्षा",
+    "عدد الأصناف المستوردة":"इम्पोर्ट आइटम","عدد الأصناف المجردة":"गिने गए आइटम","إجمالي فرق الجرد":"कुल अंतर","آخر جرد":"आखिरी गिनती",
+    "إدارة المستخدمين":"यूज़र प्रबंधन","المستخدمون المسجلون":"रजिस्टर यूज़र","الاسم":"नाम","الدور":"भूमिका","ملاحظة":"नोट","الإجراءات":"कार्य",
+    "قراءة الباركود بالكاميرا":"कैमरा बारकोड","تشغيل الكاميرا الاحترافية":"कैमरा शुरू","وضع بديل":"विकल्प","إيقاف الكاميرا":"कैमरा बंद",
+    "بيانات الصنف":"आइटम विवरण","الكمية الفعلية من الطبيعة":"वास्तविक मात्रा","ملاحظات":"नोट्स","حفظ الجرد":"गिनती सेव","إلغاء":"रद्द",
+    "الأصناف المستوردة":"इम्पोर्ट आइटम","بحث بالاسم أو الباركود":"नाम/बारकोड खोज","الباركود":"बारकोड","الصنف":"आइटम","كمية النظام":"सिस्टम मात्रा","الوحدة":"यूनिट",
+    "تقرير الجرد":"इन्वेंटरी रिपोर्ट","إغلاق الجرد الحالي":"वर्तमान गिनती बंद","بحث في تقرير الجرد":"रिपोर्ट खोज","مسح تقرير الجرد":"रिपोर्ट साफ",
+    "التاريخ والوقت":"तारीख/समय","المستخدم":"यूज़र","الكمية الفعلية":"वास्तविक मात्रा","الفرق":"अंतर",
+    "دخول الجرد":"गिनती लॉगिन","دخول":"लॉगिन","اسم الجارد":"यूज़र नाम","تاريخ الطباعة":"प्रिंट तारीख","تأكيد":"पुष्टि","نعم":"हाँ","حفظ":"सेव","حذف":"हटाएं"
+  }
+};
+let currentLang=localStorage.getItem('sanabel_lang')||'ar';
+function translateTextValue(txt){
+  if(currentLang==='ar') return txt;
+  const dict=uiDict[currentLang]||{};
+  return dict[txt]||txt;
+}
+function applyLanguage(){
+  const sel=document.getElementById('langSelect');
+  if(sel) sel.value=currentLang;
+  document.documentElement.lang=currentLang;
+  document.documentElement.dir=(currentLang==='ar'||currentLang==='ur')?'rtl':'ltr';
+  const walker=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT,{
+    acceptNode(node){
+      const parent=node.parentElement;
+      if(!parent) return NodeFilter.FILTER_REJECT;
+      if(['SCRIPT','STYLE','TEXTAREA','OPTION'].includes(parent.tagName)) return NodeFilter.FILTER_REJECT;
+      if(parent.closest('#itemsTbody,#inventoryTbody,#sessionTbody')) return NodeFilter.FILTER_REJECT;
+      const t=node.nodeValue.trim();
+      return t ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+    }
+  });
+  const nodes=[];
+  while(walker.nextNode()) nodes.push(walker.currentNode);
+  nodes.forEach(n=>{
+    if(!n._arText) n._arText=n.nodeValue.trim();
+    const translated=translateTextValue(n._arText);
+    if(translated!==n._arText) n.nodeValue=n.nodeValue.replace(n.nodeValue.trim(),translated);
+    else if(currentLang==='ar') n.nodeValue=n.nodeValue.replace(n.nodeValue.trim(),n._arText);
+  });
+  document.querySelectorAll('input[placeholder]').forEach(inp=>{
+    if(!inp.dataset.arPlaceholder) inp.dataset.arPlaceholder=inp.getAttribute('placeholder');
+    inp.setAttribute('placeholder',translateTextValue(inp.dataset.arPlaceholder));
+  });
+}
+function setLanguage(lang){
+  currentLang=lang;
+  localStorage.setItem('sanabel_lang',lang);
+  applyLanguage();
+}
+
+
+function toggleSettingsPanel(){
+  const p=document.getElementById('settingsPanel');
+  if(p) p.classList.toggle('show');
+}
+function hideSettingsPanel(){
+  const p=document.getElementById('settingsPanel');
+  if(p) p.classList.remove('show');
+}
+
+function showPage(name){
+  if(!canOpenPage(name)) name='scan';
+  hideSettingsPanel();
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+  const page=document.getElementById('page-'+name); if(page) page.classList.add('active');
+  document.querySelectorAll('.navBtn').forEach(b=>b.classList.toggle('active', b.dataset.page===name));
+  if(name!=='scan') stopScanner().catch(()=>{}); else setTimeout(()=>document.getElementById('manualBarcode')?.focus(),250);
+  window.scrollTo({top:0,behavior:'smooth'});
+}
+const itemKeys = {barcode:['باركود','الباركود','barcode','Barcode','BARCODE','كود','الكود'],name:['اسم الصنف','الصنف','الاسم','item','name','Item Name','description','الوصف'],qty:['الكمية','كمية النظام','الرصيد','qty','quantity','stock','balance'],unit:['الوحدة','وحدة','unit','uom','Unit'],cost:['التكلفة','تكلفة','تكلفة الصنف','سعر التكلفة','cost','Cost','unit cost','Unit Cost','price','Price']};
+function pick(row, keys){for(const k of keys){if(row[k]!==undefined && row[k]!==null && String(row[k]).trim()!=='') return row[k]} return ''}
+function saveAll(){rebuildItems();safeSet('sanabel_inventory',JSON.stringify(inventory));safeSet('sanabel_sessions',JSON.stringify(sessions));safeSet('sanabel_import_history',JSON.stringify(importHistory)); saveUsers(); updateKpis(); renderSessionsList();}
+function nowText(){const d=new Date(); return d.toLocaleString('en-GB',{year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});}
+async function fileSignature(file, buffer){
+  try{
+    const hashBuffer=await crypto.subtle.digest('SHA-256', buffer.slice(0));
+    const hashArray=Array.from(new Uint8Array(hashBuffer));
+    return hashArray.map(b=>b.toString(16).padStart(2,'0')).join('');
+  }catch(e){
+    return file.name+'_'+file.size+'_'+file.lastModified;
+  }
+}
+function normalizeBarcodeValue(v){
+  let code=String(v??'').trim();
+  if(/^[0-9]+\.0+$/.test(code)) code=code.replace(/\.0+$/,'');
+  return code;
+}
+
+function importExcel(e){ importExcelMain(e); }
+function importExcelMain(e){ importExcelToList(e,'all'); }
+function importExcelOther(e){ importExcelToList(e,'all'); }
+
+function normalizeImportText(v){
+  return String(v??'').trim().replace(/\s+/g,' ').replace(/[ـ]/g,'');
+}
+function normalizeHeaderText(v){
+  return normalizeImportText(v).toLowerCase()
+    .replace(/[إأآا]/g,'ا')
+    .replace(/[ة]/g,'ه')
+    .replace(/[ى]/g,'ي')
+    .replace(/[^\u0600-\u06FFa-z0-9]/g,'');
+}
+function pickSmart(row, keys){
+  const wanted=(keys||[]).map(normalizeHeaderText);
+  const entries=Object.keys(row||{}).map(k=>({key:k,norm:normalizeHeaderText(k)}));
+  for(const w of wanted){
+    const found=entries.find(e=>e.norm===w || e.norm.includes(w) || w.includes(e.norm));
+    if(found && row[found.key]!==undefined && row[found.key]!==null && String(row[found.key]).trim()!=='') return row[found.key];
+  }
+  return '';
+}
+function toImportNumber(v){
+  const s=String(v??'').replace(/,/g,'').replace(/[^\d.\-]/g,'').trim();
+  const n=Number(s);
+  return Number.isFinite(n)?n:0;
+}
+function rowToImportItem(r, source){
+  const barcode=normalizeBarcodeValue(pickSmart(r,itemKeys.barcode));
+  if(!barcode) return null;
+  return {
+    barcode,
+    name:normalizeImportText(pickSmart(r,itemKeys.name)||'بدون اسم'),
+    qty:toImportNumber(pickSmart(r,itemKeys.qty)),
+    unit:normalizeImportText(pickSmart(r,itemKeys.unit)),
+    cost:toImportNumber(pickSmart(r,itemKeys.cost)),
+    source
+  };
+}
+function rowsFromWorksheet(ws){
+  // القراءة العادية أولاً
+  let rows=XLSX.utils.sheet_to_json(ws,{defval:'',raw:false});
+  let valid=rows.filter(r=>normalizeBarcodeValue(pickSmart(r,itemKeys.barcode))).length;
+  if(valid>0) return rows;
+
+  // احتياط: لو كانت أول صفوف ملاحظات ثم الجدول بعدها، نبحث عن صف العناوين
+  const matrix=XLSX.utils.sheet_to_json(ws,{header:1,defval:'',raw:false});
+  let bestHeader=-1, bestScore=0;
+  for(let i=0;i<Math.min(matrix.length,25);i++){
+    const joined=(matrix[i]||[]).map(normalizeHeaderText).join(' ');
+    let score=0;
+    if(joined.includes('باركود') || joined.includes('barcode')) score+=3;
+    if(joined.includes('الصنف') || joined.includes('item') || joined.includes('name')) score+=2;
+    if(joined.includes('الكميه') || joined.includes('qty') || joined.includes('quantity')) score+=1;
+    if(score>bestScore){bestScore=score; bestHeader=i;}
+  }
+  if(bestHeader>=0 && bestScore>=3){
+    const headers=matrix[bestHeader].map(h=>normalizeImportText(h));
+    rows=matrix.slice(bestHeader+1).map(arr=>{
+      const obj={};
+      headers.forEach((h,idx)=>{ if(h) obj[h]=arr[idx]??''; });
+      return obj;
+    });
+  }
+  return rows;
+}
+function chooseBestWorksheet(wb){
+  let best=null, bestRows=[], bestCount=-1;
+  for(const sName of wb.SheetNames){
+    const ws=wb.Sheets[sName];
+    const rows=rowsFromWorksheet(ws);
+    const count=rows.filter(r=>normalizeBarcodeValue(pickSmart(r,itemKeys.barcode))).length;
+    if(count>bestCount){best=ws; bestRows=rows; bestCount=count;}
+  }
+  return {ws:best, rows:bestRows, count:bestCount};
+}
+
+function mergeImportedItemsSmart(newItems){
+  // دمج ذكي: لا نستبدل الأصناف القديمة، بل نضيف الجديد ونحدث المكرر حسب الباركود
+  const map=new Map();
+  const oldItems=[...(itemsMain||[]),...(itemsOther||[]),...(items||[])];
+  oldItems.forEach(it=>{
+    const code=normalizeBarcodeValue(it?.barcode);
+    if(!code) return;
+    map.set(code,{...it,barcode:code,source:it.source||'الأصناف'});
+  });
+  let added=0, updated=0;
+  newItems.forEach(it=>{
+    const code=normalizeBarcodeValue(it?.barcode);
+    if(!code) return;
+    const clean={...it,barcode:code,source:'الأصناف'};
+    if(map.has(code)) updated++; else added++;
+    map.set(code,clean);
+  });
+  itemsMain=Array.from(map.values());
+  itemsOther=[];
+  rebuildItems();
+  return {added,updated,total:items.length};
+}
+function importExcelToList(e,type){
+  const files=Array.from(e?.target?.files||[]);
+  if(!files.length) return;
+  const importMsg=document.getElementById('importMsg');
+  let allImported=[];
+  let processed=0;
+  let failed=0;
+
+  const readOneFile=(file)=>new Promise(resolve=>{
+    const reader=new FileReader();
+    reader.onload=async ev=>{
+      try{
+        const buffer=ev.target.result;
+        const sig=await fileSignature(file, buffer);
+        const wb=XLSX.read(buffer,{type:'array'});
+        const chosen=chooseBestWorksheet(wb);
+        const rows=chosen.rows || [];
+        const imported=[];
+        rows.forEach(r=>{
+          const item=rowToImportItem(r,'الأصناف');
+          if(item) imported.push(item);
+        });
+        if(imported.length){
+          allImported=allImported.concat(imported);
+          importHistory.unshift({signature:sig,type:'all',name:file.name,size:file.size,datetime:nowText(),count:imported.length});
+          processed++;
+        }else{
+          failed++;
+        }
+      }catch(err){
+        console.error(err);
+        failed++;
+      }
+      resolve();
+    };
+    reader.onerror=()=>{failed++; resolve();};
+    reader.readAsArrayBuffer(file);
+  });
+
+  (async()=>{
+    try{
+      if(importMsg) importMsg.innerHTML='<div class="ok">جاري استيراد الملف/الملفات... انتظر حتى تظهر رسالة النجاح.</div>';
+      for(const file of files){ await readOneFile(file); }
+
+      if(!allImported.length){
+        if(importMsg) importMsg.innerHTML='<div class="warn">لم يتم العثور على أصناف صالحة داخل الملف. تأكد أن الملف يحتوي على عمود باركود واسم الصنف والكمية.</div>';
+        e.target.value='';
+        return;
+      }
+
+      const result=mergeImportedItemsSmart(allImported);
+      importHistory=importHistory.slice(0,80);
+      saveAll();
+      syncItemsCloud();
+      renderItemsTable();
+      updateKpis();
+
+      e.target.value='';
+      if(importMsg) importMsg.innerHTML=`<div class="ok">تم الاستيراد بنجاح. الملفات المقبولة: <b>${processed}</b>، الأصناف المقروءة: <b>${allImported.length}</b>، الجديد: <b>${result.added}</b>، المحدث: <b>${result.updated}</b>، إجمالي الأصناف الآن: <b>${result.total}</b>${failed?`<br>ملفات لم تُقرأ: <b>${failed}</b>`:''}</div>`;
+    }catch(err){
+      console.error(err);
+      if(importMsg) importMsg.innerHTML='<div class="warn">تعذر قراءة الملف. تأكد أن الأعمدة موجودة وأن الملف غير تالف.</div>';
+      try{ e.target.value=''; }catch(_){}
+    }
+  })();
+}
+
+function downloadTemplate(){const data=[{'الباركود':'628000000001','اسم الصنف':'مثال صنف','الكمية':10,'الوحدة':'كرتون','التكلفة':3.75}]; const ws=XLSX.utils.json_to_sheet(data); const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'الأصناف'); XLSX.writeFile(wb,'نموذج_استيراد_اصناف_سنابل.xlsx');}
+function renderItemsTable(){const q=(document.getElementById('searchItems')?.value||'').trim(); const body=document.getElementById('itemsTbody'); if(!body)return; body.innerHTML=''; items.filter(i=>!q||String(i.barcode||'').includes(q)||String(i.name||'').includes(q)).slice(0,700).forEach(i=>{body.innerHTML+=`<tr><td>${esc(i.source||'-')}</td><td>${esc(i.barcode)}</td><td>${esc(i.name)}</td><td>${num(i.qty)}</td><td>${esc(i.unit)}</td><td>${num(i.cost||0)}</td></tr>`});}
+
+function trackKey(event){
+  if(event.key==='Enter'){
+    event.preventDefault();
+    searchItemHistory();
+  }
+}
+function clearTrackSearch(){
+  const q=document.getElementById('trackQuery'); if(q) q.value='';
+  const s=document.getElementById('trackSuggestions'); if(s) s.innerHTML='';
+  const r=document.getElementById('trackResults'); if(r) r.innerHTML='<p class="muted">ابدأ بالبحث عن صنف لعرض سجله التاريخي.</p>';
+}
+function trackLiveSearch(){
+  const q=String(document.getElementById('trackQuery')?.value||'').trim();
+  const box=document.getElementById('trackSuggestions');
+  if(!box)return;
+  if(q.length<2){box.innerHTML='';return;}
+  const found=items.filter(i=>String(i.barcode||'').includes(q)||String(i.name||'').includes(q)).slice(0,8);
+  box.innerHTML=found.map(i=>`<button type="button" onclick="selectTrackItem('${String(i.barcode).replace(/'/g,"\\'")}')">${esc(i.name)}<br><small>${esc(i.barcode)}</small></button>`).join('');
+}
+function selectTrackItem(barcode){
+  const q=document.getElementById('trackQuery'); if(q) q.value=barcode;
+  searchItemHistory();
+}
+function diffClass(v){v=Number(v||0); return v>0?'trackGood':v<0?'trackBad':'trackZero';}
+function diffStatus(v){v=Number(v||0); return v>0?'زيادة':v<0?'عجز':'مطابق';}
+let currentTrackItemBarcode='';
+function normalizeDateText(t){return String(t||'-').replace(/^,\s*/,'');}
+function itemHistoryRows(item){
+  const barcode=String(item?.barcode||'');
+  let rows=[];
+  (sessions||[]).forEach(s=>{
+    (s.records||[]).forEach(r=>{
+      if(String(r.barcode)===barcode){
+        rows.push({
+          source:'مغلق',sessionNo:s.number||'-',sessionId:s.id||'',approved:!!s.approved,approvedText:sessionStatusText(s),closedAt:s.datetime||'',duration:s.durationText||s.duration||'',
+          datetime:r.datetime||'',user:userNameOf(r),barcode:r.barcode,name:r.name,systemQty:r.systemQty,actualQty:r.actualQty,diff:Number(r.diff||0),unit:r.unit||'',notes:r.notes||''
+        });
+      }
+    });
+  });
+  (inventory||[]).forEach(r=>{
+    if(String(r.barcode)===barcode){
+      rows.push({source:'الجرد الحالي',sessionNo:'حالي',sessionId:'',approved:false,approvedText:'غير مغلق',closedAt:'-',duration:'-',datetime:r.datetime||'',user:userNameOf(r),barcode:r.barcode,name:r.name,systemQty:r.systemQty,actualQty:r.actualQty,diff:Number(r.diff||0),unit:r.unit||'',notes:r.notes||''});
+    }
+  });
+  rows.sort((a,b)=>String(b.datetime||'').localeCompare(String(a.datetime||'')));
+  return rows;
+}
+function searchItemHistory(){
+  if(!isAdmin()){appNotice('صلاحية المدير فقط','تتبع الصنف خاص بحساب المدير.');return;}
+  const q=String(document.getElementById('trackQuery')?.value||'').trim();
+  const out=document.getElementById('trackResults');
+  if(!out)return;
+  if(!q){out.innerHTML='<div class="warn">اكتب الباركود أو اسم الصنف أولاً.</div>';return;}
+  let matches=items.filter(i=>String(i.barcode)===q);
+  if(!matches.length) matches=items.filter(i=>String(i.barcode||'').includes(q)||String(i.name||'').includes(q));
+  if(!matches.length){out.innerHTML='<div class="warn">لم يتم العثور على الصنف في ملف الأصناف المستورد.</div>';return;}
+  if(matches.length>1 && !matches.some(i=>String(i.barcode)===q)){
+    out.innerHTML=`<h2>نتائج البحث</h2><p class="small">اختر الصنف المطلوب:</p><div class="trackSuggestions">${matches.slice(0,25).map(i=>`<button type="button" onclick="selectTrackItem('${String(i.barcode).replace(/'/g,"\\'")}')">${esc(i.name)}<br><small>${esc(i.barcode)}</small></button>`).join('')}</div>`;
+    return;
+  }
+  const item=matches[0];
+  currentTrackItemBarcode=String(item.barcode||'');
+  const rows=itemHistoryRows(item);
+  const totalCount=rows.length;
+  const negRows=rows.filter(r=>r.diff<0), posRows=rows.filter(r=>r.diff>0), zeroRows=rows.filter(r=>r.diff===0);
+  const negTotal=negRows.reduce((s,r)=>s+Math.abs(Number(r.diff||0)),0);
+  const posTotal=posRows.reduce((s,r)=>s+Number(r.diff||0),0);
+  const last=rows[0];
+  const tableRows=rows.map(r=>`<tr>
+    <td>${esc(r.source)}</td><td>${esc(r.sessionNo)}</td><td>${esc(normalizeDateText(r.datetime))}</td><td>${esc(r.user)}</td><td>${num(r.systemQty)}</td><td>${num(r.actualQty)}</td><td class="${diffClass(r.diff)}">${r.diff>0?'+':''}${num(r.diff)}</td><td>${esc(diffStatus(r.diff))}</td><td>${esc(r.unit)}</td><td>${esc(r.approvedText)}</td><td>${esc(r.duration||'-')}</td><td>${esc(r.notes||'')}</td>
+  </tr>`).join('');
+  out.innerHTML=`
+    <h2>سجل الصنف: ${esc(item.name)}</h2>
+    <div class="trackStats">
+      <div class="trackStat"><span>الباركود</span><b style="font-size:15px;direction:ltr;display:block">${esc(item.barcode)}</b></div>
+      <div class="trackStat"><span>كمية النظام الحالية</span><b>${num(item.qty)}</b><small>${esc(item.unit||'')}</small></div>
+      <div class="trackStat"><span>عدد مرات الجرد</span><b>${totalCount}</b></div>
+      <div class="trackStat bad"><span>مرات العجز</span><b>${negRows.length}</b><small>إجمالي النقص: ${num(negTotal)}</small></div>
+      <div class="trackStat good"><span>مرات الزيادة</span><b>${posRows.length}</b><small>إجمالي الزيادة: ${num(posTotal)}</small></div>
+    </div>
+    <div class="resultBox">
+      <b>آخر جرد للصنف:</b> ${last?`${esc(normalizeDateText(last.datetime))} - الموظف: ${esc(last.user)} - الكمية يوم الجرد: ${num(last.actualQty)} - الفرق: <span class="${diffClass(last.diff)}">${last.diff>0?'+':''}${num(last.diff)}</span>`:'لا يوجد جرد سابق لهذا الصنف.'}
+      <br><b>المطابقة:</b> ${zeroRows.length} مرة - <b>حالة الصنف:</b> ${negRows.length>=3?'<span class="trackBad">صنف خطر: العجز متكرر</span>':posRows.length>=3?'<span class="trackGood">زيادة متكررة تحتاج مراجعة</span>':'طبيعي'}
+    </div>
+    <div class="tableWrap"><table><thead><tr><th>المصدر</th><th>رقم الجرد</th><th>تاريخ الجرد</th><th>الموظف</th><th>كمية النظام يوم الجرد</th><th>الكمية الفعلية يوم الجرد</th><th>الفرق</th><th>الحالة</th><th>الوحدة</th><th>الاعتماد</th><th>مدة الجرد</th><th>ملاحظات</th></tr></thead><tbody>${tableRows || '<tr><td colspan="12">لا يوجد جرد سابق لهذا الصنف.</td></tr>'}</tbody></table></div>
+  `;
+}
+
+
+function sessionStats(records){
+  const arr=records||[];
+  const neg=arr.filter(r=>Number(r.diff||0)<0);
+  const pos=arr.filter(r=>Number(r.diff||0)>0);
+  const zero=arr.filter(r=>Number(r.diff||0)===0);
+  return {
+    total:arr.length,
+    negCount:neg.length,
+    posCount:pos.length,
+    zeroCount:zero.length,
+    negTotal:neg.reduce((a,r)=>a+Math.abs(Number(r.diff||0)),0),
+    posTotal:pos.reduce((a,r)=>a+Number(r.diff||0),0),
+    totalDiff:arr.reduce((a,r)=>a+Number(r.diff||0),0)
+  };
+}
+function pad2(n){return String(n).padStart(2,'0')}
+function formatDurationMs(ms){
+  ms=Math.max(0,Number(ms||0));
+  const sec=Math.floor(ms/1000);
+  const h=Math.floor(sec/3600), m=Math.floor((sec%3600)/60), s=sec%60;
+  return `${pad2(h)}:${pad2(m)}:${pad2(s)}`;
+}
+function parseLocalDateText(t){
+  const str=String(t||'').replace(/^,\s*/,'').trim();
+  const m=str.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2}):(\d{2})/);
+  if(!m)return null;
+  return new Date(Number(m[3]),Number(m[2])-1,Number(m[1]),Number(m[4]),Number(m[5]),Number(m[6]));
+}
+function computeSessionDuration(session){
+  if(session?.durationText) return session.durationText;
+  const records=session?.records||[];
+  if(!records.length) return '00:00:00';
+  const dates=records.map(r=>parseLocalDateText(r.datetime)).filter(Boolean).map(d=>d.getTime());
+  const end=parseLocalDateText(session.datetime)?.getTime() || Math.max(...dates);
+  const start=session.startedAt ? (parseLocalDateText(session.startedAt)?.getTime()||Math.min(...dates)) : Math.min(...dates);
+  return formatDurationMs(end-start);
+}
+function diffHtml(v){
+  v=Number(v||0);
+  const cls=v>0?'diffPos':v<0?'diffNeg':'diffZero';
+  return `<span class="${cls}">${v>0?'+':''}${num(v)}</span>`;
+}
+async function printItemHistory(){
+  if(!isAdmin()){await appNotice('صلاحية المدير فقط','طباعة تتبع الصنف خاص بحساب المدير.');return;}
+  let barcode=currentTrackItemBarcode || String(document.getElementById('trackQuery')?.value||'').trim();
+  if(!barcode){await appNotice('تنبيه','ابحث عن الصنف أولاً ثم اطبع التقرير.');return;}
+  let item=items.find(i=>String(i.barcode)===barcode) || items.find(i=>String(i.barcode||'').includes(barcode)||String(i.name||'').includes(barcode));
+  if(!item){await appNotice('تنبيه','لم يتم العثور على الصنف.');return;}
+  const rows=itemHistoryRows(item);
+  const st=sessionStats(rows);
+  const area=document.getElementById('sessionPrintArea');
+  if(!area){window.print();return;}
+  area.innerHTML=`<h1>تقرير تتبع صنف في الجرد</h1>
+    <div class="printKpiGrid">
+      <div class="printKpi"><span class="ico">🔎</span><span>عدد مرات الجرد</span><b>${st.total}</b></div>
+      <div class="printKpi"><span class="ico">🔴</span><span>مرات العجز</span><b class="diffNeg">${st.negCount}</b><small>إجمالي النقص: ${num(st.negTotal)}</small></div>
+      <div class="printKpi"><span class="ico">🟢</span><span>مرات الزيادة</span><b class="diffPos">${st.posCount}</b><small>إجمالي الزيادة: ${num(st.posTotal)}</small></div>
+      <div class="printKpi"><span class="ico">✅</span><span>مرات المطابقة</span><b>${st.zeroCount}</b></div>
+      <div class="printKpi"><span class="ico">📦</span><span>كمية النظام الحالية</span><b>${num(item.qty)}</b><small>${esc(item.unit||'')}</small></div>
+    </div>
+    <div class="printMeta">
+      <div>الصنف: ${esc(item.name)}</div><div>الباركود: ${esc(item.barcode)}</div><div>تاريخ الطباعة: ${esc(nowText())}</div><div>طبع بواسطة: ${esc(currentUser||'-')}</div>
+    </div>
+    <table class="printTable"><thead><tr>
+      <th style="width:4%">م</th><th style="width:8%">المصدر</th><th style="width:7%">رقم الجرد</th><th style="width:12%">تاريخ الجرد</th><th style="width:10%">الموظف</th><th style="width:10%">كمية النظام يوم الجرد</th><th style="width:10%">الكمية الفعلية يوم الجرد</th><th style="width:7%">الفرق</th><th style="width:8%">الحالة</th><th style="width:7%">الوحدة</th><th style="width:9%">الاعتماد</th><th style="width:8%">مدة الجرد</th>
+    </tr></thead><tbody>${rows.map((r,i)=>`<tr><td>${i+1}</td><td>${esc(r.source)}</td><td>${esc(r.sessionNo)}</td><td>${esc(normalizeDateText(r.datetime))}</td><td>${esc(r.user)}</td><td>${num(r.systemQty)}</td><td>${num(r.actualQty)}</td><td>${diffHtml(r.diff)}</td><td>${esc(diffStatus(r.diff))}</td><td>${esc(r.unit)}</td><td>${esc(r.approvedText)}</td><td>${esc(r.duration||'-')}</td></tr>`).join('') || '<tr><td colspan="12">لا يوجد سجل جرد لهذا الصنف.</td></tr>'}</tbody></table>
+    <div class="printFoot">تطبيق جرد أسواق سنابل المع</div>`;
+  document.body.classList.add('printSessionOnly');
+  setTimeout(()=>{window.print(); setTimeout(()=>document.body.classList.remove('printSessionOnly'),700);},150);
+}
+
+function recordCostTotal(r){return Number(r.actualQty||0)*Number(r.cost||0);}
+function recordDiffCost(r){return Number(r.diff||0)*Number(r.cost||0);}
+function findImportedItem(code){
+  code=normalizeBarcodeValue(code);
+  return items.find(i=>String(i.barcode)===code) || items.find(i=>String(i.barcode||'').trim()===code);
+}
+function findItem(code){
+  code=String(code||'').trim();
+  if(!code)return;
+  const item=findImportedItem(code);
+  const old=inventory.find(x=>String(x.barcode)===code);
+  if(!item){
+    document.getElementById('scanMsg').innerHTML='<div class="warn">الباركود غير موجود في ملف الأصناف.</div>';
+    resetCurrent();
+    return;
+  }
+  currentItem=item;
+  document.getElementById('barcode').value=item.barcode;
+  document.getElementById('countForm').classList.remove('hide');
+  if(old){
+    document.getElementById('actualQty').value=old.actualQty;
+    document.getElementById('notes').value=old.notes||'';
+  }else{
+    document.getElementById('actualQty').value='';
+    document.getElementById('notes').value='';
+  }
+  document.getElementById('actualQty').focus();
+  document.getElementById('itemBox').innerHTML=`<div class="scanItemCard">
+    <div class="title">📦 ${esc(item.name)}</div>
+    <div class="barcodeLine">${esc(item.barcode)}</div>
+    <div class="metaGrid">
+      <div class="meta"><span>كمية النظام</span><b>${num(item.qty)}</b></div>
+      <div class="meta"><span>الوحدة</span><b>${esc(item.unit||'-')}</b></div>
+      <div class="meta"><span>التكلفة</span><b>${num(item.cost||0)}</b></div>
+      <div class="meta"><span>مصدر الملف</span><b>${esc(item.source||'-')}</b></div>
+    </div>
+    <div class="editMini">
+      <button class="btnBlue" type="button" onclick="document.getElementById('actualQty').focus()">تعديل / إدخال الكمية الفعلية</button>
+      <button class="btn2" type="button" onclick="document.getElementById('actualQty').value=String(currentItem.qty||0);document.getElementById('actualQty').focus()">نسخ كمية النظام</button>
+    </div>
+    ${old ? `<div class="previousWarn">⚠️ تم جرد هذا الصنف سابقًا بتاريخ ${esc(old.datetime)}<br>عدّل الكمية ثم اضغط حفظ الجرد لتحديث الجرد السابق.</div>` : ''}
+  </div>`;
+  document.getElementById('scanMsg').innerHTML=old?'<div class="warn">هذا الصنف تم جرده سابقًا، يمكنك تعديل الجرد السابق الآن.</div>':'<div class="ok">تم العثور على الصنف.</div>';
+  if(typeof markScanOk==='function') markScanOk();
+}
+async function saveCount(e){
+  e.preventDefault();
+  if(!currentUser){logoutUser();return;}
+  if(!currentItem)return;
+  const actual=Number(document.getElementById('actualQty').value||0);
+  const diff=actual-Number(currentItem.qty||0);
+  if(!localStorage.getItem('sanabel_inventory_started_at')) localStorage.setItem('sanabel_inventory_started_at',nowText());
+  const record={datetime:nowText(),userName:currentUser,shelfCode:(localStorage.getItem('sanabel_current_shelf')||''),barcode:currentItem.barcode,name:currentItem.name,systemQty:Number(currentItem.qty||0),actualQty:actual,diff,unit:currentItem.unit,cost:Number(currentItem.cost||0),source:currentItem.source||'',costTotal:actual*Number(currentItem.cost||0),diffCost:diff*Number(currentItem.cost||0),notes:document.getElementById('notes').value||''};
+  const idx=inventory.findIndex(x=>String(x.barcode)===String(record.barcode));
+  if(idx>=0){
+    const old=inventory[idx];
+    const ok=await appConfirm('الصنف مجرود سابقًا',`تم جرد هذا الصنف سابقًا بتاريخ <b>${esc(old.datetime)}</b>.<br>الكمية السابقة: <b>${num(old.actualQty)}</b><br>هل تريد تعديل الجرد السابق بهذه الكمية الجديدة؟`,'تعديل الجرد السابق','إلغاء');
+    if(!ok)return;
+    inventory[idx]=record;
+  }else{
+    inventory.unshift(record);
+  }
+  saveAll();
+  syncInventoryCloud();
+  renderInventoryTable();
+  resetCurrent();
+  document.getElementById('scanMsg').innerHTML='<div class="ok">تم حفظ الجرد بنجاح.</div>';
+}
+function resetCurrent(){currentItem=null;document.getElementById('countForm').classList.add('hide');document.getElementById('itemBox').innerHTML='<p class="muted">اقرأ الباركود أو ابحث يدويًا لظهور بيانات الصنف هنا.</p>';document.getElementById('actualQty').value='';document.getElementById('notes').value='';document.getElementById('manualBarcode').value='';}
+function renderInventoryTable(){const q=(document.getElementById('searchCounts')?.value||'').trim(); const body=document.getElementById('inventoryTbody'); if(!body)return; body.innerHTML=''; inventory.filter(r=>!q||String(r.barcode||'').includes(q)||String(r.name||'').includes(q)).forEach(r=>{let cls=r.diff>0?'diffMinus':r.diff<0?'diffPlus':'diffZero';body.innerHTML+=`<tr><td>${esc(r.datetime)}</td><td>${esc(userNameOf(r))}</td><td>${esc(r.shelfCode||'')}</td><td>${esc(r.barcode)}</td><td>${esc(r.name)}</td><td>${num(r.systemQty)}</td><td>${num(r.actualQty)}</td><td class="${cls}">${num(r.diff)}</td><td>${esc(r.unit)}</td><td>${num(r.cost||0)}</td><td>${num(recordCostTotal(r))}</td><td>${esc(r.notes)}</td></tr>`}); document.getElementById('printDate').textContent=nowText(); const pu=document.getElementById('printUserName'); if(pu) pu.textContent=currentUser;}
+function updateKpis(){document.getElementById('kpiItems').textContent=items.length;document.getElementById('kpiCounted').textContent=inventory.length;document.getElementById('kpiDiff').textContent=num(inventory.reduce((s,r)=>s+Number(r.diff||0),0));document.getElementById('kpiLast').textContent=inventory[0]?.datetime||'-';}
+async function startScanner(mode='quagga'){
+  await stopScanner();
+  const shell=document.getElementById('scannerShell');
+  const video=document.getElementById('nativeVideo');
+  const quaggaDiv=document.getElementById('quaggaReader');
+  shell?.classList.add('active');
+  document.getElementById('scanMsg').innerHTML='<div class="ok">جاري تشغيل الكاميرا... اسمح للكاميرا إذا طلب المتصفح.</div>';
+
+  if(mode==='quagga' && window.Quagga){
+    try{
+      video?.classList.add('hide');
+      quaggaDiv?.classList.remove('hide');
+      await new Promise((resolve,reject)=>{
+        Quagga.init({
+          inputStream:{
+            name:'Live',
+            type:'LiveStream',
+            target:quaggaDiv,
+            constraints:{
+              facingMode:'environment',
+              width:{min:640,ideal:1280,max:1920},
+              height:{min:480,ideal:720,max:1080},
+              aspectRatio:{ideal:1.777}
+            },
+            area:{top:'25%',right:'5%',left:'5%',bottom:'25%'}
+          },
+          locator:{patchSize:'medium',halfSample:false},
+          numOfWorkers:navigator.hardwareConcurrency ? Math.min(4,navigator.hardwareConcurrency) : 2,
+          frequency:12,
+          decoder:{
+            readers:[
+              'ean_reader',
+              'ean_8_reader',
+              'code_128_reader',
+              'upc_reader',
+              'upc_e_reader',
+              'code_39_reader',
+              'i2of5_reader'
+            ],
+            multiple:false
+          },
+          locate:true
+        }, err=> err ? reject(err) : resolve());
+      });
+      Quagga.offDetected();
+      Quagga.onDetected(data=>{
+        const code=data?.codeResult?.code || '';
+        const decoded=data?.codeResult?.decodedCodes || [];
+        const errors=decoded.filter(x=>x.error!==undefined).map(x=>x.error);
+        const avgErr=errors.length ? errors.reduce((a,b)=>a+b,0)/errors.length : 0;
+        if(code && avgErr < 0.35) acceptScannedCode(code);
+      });
+      Quagga.start();
+      quaggaRunning=true;
+      document.getElementById('scanMsg').innerHTML='<div class="ok">الكاميرا الاحترافية تعمل الآن. وجّه الباركود داخل الإطار الذهبي.</div>';
+      return;
+    }catch(e){
+      try{Quagga.stop();}catch(_){}
+      quaggaRunning=false;
+    }
+  }
+
+  try{
+    if('BarcodeDetector' in window && navigator.mediaDevices?.getUserMedia){
+      nativeBarcodeDetector=new BarcodeDetector({formats:['ean_13','ean_8','code_128','code_39','upc_a','upc_e','itf']});
+      nativeStream=await navigator.mediaDevices.getUserMedia({
+        video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:720}},
+        audio:false
+      });
+      quaggaDiv?.classList.add('hide');
+      video.classList.remove('hide');
+      video.srcObject=nativeStream;
+      await video.play();
+      nativeScanLoop=true;
+      const loop=async()=>{
+        if(!nativeScanLoop || !nativeBarcodeDetector)return;
+        try{
+          const codes=await nativeBarcodeDetector.detect(video);
+          if(codes && codes.length) acceptScannedCode(codes[0].rawValue || '');
+        }catch(e){}
+        requestAnimationFrame(loop);
+      };
+      loop();
+      document.getElementById('scanMsg').innerHTML='<div class="ok">الوضع البديل يعمل الآن. وجّه الباركود داخل الإطار.</div>';
+      return;
+    }
+  }catch(e){ await stopNativeScannerOnly(); }
+
+  try{
+    if(window.ZXing){
+      zxingReader=new ZXing.BrowserMultiFormatReader();
+      const devices=await zxingReader.listVideoInputDevices();
+      const back=devices.find(d=>/back|rear|environment|خلف/i.test(d.label)) || devices[devices.length-1];
+      quaggaDiv?.classList.add('hide');
+      video.classList.remove('hide');
+      await zxingReader.decodeFromVideoDevice(back?.deviceId || null, 'nativeVideo', (result, err)=>{
+        if(result) acceptScannedCode(result.getText());
+      });
+      document.getElementById('scanMsg').innerHTML='<div class="ok">وضع ZXing يعمل الآن. وجّه الباركود داخل الإطار.</div>';
+      return;
+    }
+  }catch(e){}
+
+  shell?.classList.remove('active');
+  document.getElementById('scanMsg').innerHTML='<div class="warn">تعذر تشغيل قارئ الكاميرا. استخدم Chrome أو Edge، وتأكد أن الرابط https، واسمح للكاميرا من إعدادات الموقع.</div>';
+}
+async function stopNativeScannerOnly(){
+  nativeScanLoop=false;
+  if(nativeStream){
+    nativeStream.getTracks().forEach(t=>t.stop());
+    nativeStream=null;
+  }
+  nativeBarcodeDetector=null;
+  const video=document.getElementById('nativeVideo');
+  if(video){video.pause(); video.srcObject=null; video.classList.add('hide');}
+}
+async function stopScanner(){
+  document.getElementById('scannerShell')?.classList.remove('active');
+  await stopNativeScannerOnly();
+  if(quaggaRunning || window.Quagga){
+    try{Quagga.offDetected(); Quagga.stop();}catch(e){}
+    quaggaRunning=false;
+  }
+  document.getElementById('quaggaReader')?.classList.add('hide');
+  if(scanner){
+    try{await scanner.stop();}catch(e){}
+    try{scanner.clear();}catch(e){}
+    scanner=null;
+  }
+  if(zxingReader){
+    try{zxingReader.reset();}catch(e){}
+    zxingReader=null;
+  }
+}
+
+function nextSessionNumber(){
+  return sessions.reduce((m,s)=>Math.max(m,Number(s.number||0)),0)+1;
+}
+async function closeInventorySession(){
+  if(!currentUser){logoutUser();return;}
+  if(!inventory.length){
+    await appNotice('لا يوجد جرد حالي','لا يوجد عمليات جرد حالية لإغلاقها.');
+    return;
+  }
+  const no=nextSessionNumber();
+  const ok=await appConfirm('إغلاق الجرد الحالي',`سيتم إغلاق الجرد الحالي وترحيله إلى قسم الجرد المغلق باسم <b>جرد رقم ${no}</b>.<br>بعد الإغلاق يبدأ جرد جديد فارغ. هل تريد المتابعة؟`,'إغلاق الجرد','إلغاء');
+  if(!ok)return;
+  const totalDiff=inventory.reduce((s,r)=>s+Number(r.diff||0),0);
+  const totalCost=inventory.reduce((s,r)=>s+recordCostTotal(r),0);
+  const totalDiffCost=inventory.reduce((s,r)=>s+recordDiffCost(r),0);
+  const closeAt=nowText();
+  const startedAt=localStorage.getItem('sanabel_inventory_started_at') || (inventory[0]?.datetime || closeAt);
+  const startMs=parseLocalDateText(startedAt)?.getTime() || parseLocalDateText(inventory[0]?.datetime)?.getTime() || Date.now();
+  const endMs=parseLocalDateText(closeAt)?.getTime() || Date.now();
+  const durationText=formatDurationMs(endMs-startMs);
+  const session={id:'S'+Date.now(),number:no,userName:currentUser,startedAt,datetime:closeAt,durationText,approved:false,approvedBy:'',approvedAt:'',count:inventory.length,totalDiff,totalCost,totalDiffCost,startedAt:(inventoryStartedAt||''),closedAt:new Date().toISOString(),durationText:calcInventoryDuration(inventory,{startedAt:(inventoryStartedAt||''),closedAt:new Date().toISOString()}),records:JSON.parse(JSON.stringify(inventory))};
+  sessions.unshift(session);
+  inventory=[];
+  inventoryStartedAt='';
+  localStorage.removeItem('sanabel_inventory_started_at');
+  localStorage.removeItem('sanabel_inventory_started_at');
+  saveAll();
+  syncInventoryCloud();
+  renderInventoryTable();
+  renderSessionsList();
+  showPage('sessions');
+  setTimeout(()=>{const sel=document.getElementById('sessionSelect'); if(sel) sel.value=session.id; renderSessionDetails();},50);
+  await appNotice('تم إغلاق الجرد بنجاح',`تم ترحيل الجرد إلى قسم الجرد المغلق باسم <b>جرد رقم ${no}</b>.`,'تمام');
+}
+function renderSessionsList(){
+  const sel=document.getElementById('sessionSelect');
+  if(!sel)return;
+  const current=sel.value;
+  sel.innerHTML='';
+  if(!sessions.length){
+    sel.innerHTML='<option value="">لا يوجد جرد مغلق</option>';
+    return;
+  }
+  sessions.forEach(s=>{
+    const opt=document.createElement('option');
+    opt.value=s.id;
+    opt.textContent=`جرد رقم ${s.number} - ${s.userName||'-'} - ${sessionStatusText(s)} - ${s.datetime} - ${s.count} صنف`;
+    sel.appendChild(opt);
+  });
+  if(current && sessions.some(s=>s.id===current)) sel.value=current;
+}
+function getSelectedSession(){
+  const id=document.getElementById('sessionSelect')?.value;
+  return sessions.find(s=>s.id===id) || sessions[0] || null;
+}
+function renderSessionDetails(){
+  const s=getSelectedSession();
+  const body=document.getElementById('sessionTbody');
+  const box=document.getElementById('sessionSummary');
+  if(!body || !box)return;
+  body.innerHTML='';
+  if(!s){
+    box.innerHTML='<p class="muted">لا يوجد جرد مغلق حتى الآن.</p>';
+    return;
+  }
+  box.innerHTML=`<b>جرد رقم ${s.number}</b> <span class="userBadge">${esc(s.userName||'-')}</span> <span class="approvalBadge ${s.approved?'approved':'pending'}">${sessionStatusText(s)}</span><br>تاريخ الإغلاق: ${esc(s.datetime)}<br>اسم الجارد: <b>${esc(s.userName||'-')}</b><br>اعتمد بواسطة: <b>${esc(s.approvedBy||'-')}</b> ${s.approvedAt?`- ${esc(s.approvedAt)}`:''}<br>عدد الأصناف: <b>${s.count}</b><br>إجمالي الفرق: <b>${num(s.totalDiff)}</b><br>إجمالي تكلفة الأصناف المجردة: <b>${num(s.totalCost ?? (s.records||[]).reduce((a,r)=>a+recordCostTotal(r),0))}</b><br>إجمالي فرق التكلفة: <b>${num(s.totalDiffCost ?? (s.records||[]).reduce((a,r)=>a+recordDiffCost(r),0))}</b><br>مدة الجرد: <b>${esc(computeSessionDuration(s))}</b>`;
+  (s.records||[]).forEach(r=>{
+    let cls=r.diff>0?'diffMinus':r.diff<0?'diffPlus':'diffZero';
+    body.innerHTML+=`<tr><td>${esc(r.datetime)}</td><td>${esc(userNameOf(r))}</td><td>${esc(r.shelfCode||'')}</td><td>${esc(r.barcode)}</td><td>${esc(r.name)}</td><td>${num(r.systemQty)}</td><td>${num(r.actualQty)}</td><td class="${cls}">${num(r.diff)}</td><td>${esc(r.unit)}</td><td>${num(r.cost||0)}</td><td>${num(recordCostTotal(r))}</td><td>${esc(r.notes)}</td></tr>`;
+  });
+}
+function sessionRowsForExport(s){
+  return (s?.records||[]).map(r=>({'التاريخ والوقت':r.datetime,'الجارد':userNameOf(r),'مصدر الملف':r.source||'','الباركود':r.barcode,'اسم الصنف':r.name,'كمية النظام':r.systemQty,'الكمية الفعلية':r.actualQty,'الفرق':r.diff,'الوحدة':r.unit,'التكلفة':r.cost||0,'إجمالي التكلفة':recordCostTotal(r),'فرق التكلفة':recordDiffCost(r),'ملاحظات':r.notes}));
+}
+
+
+function sessionStatusText(s){
+  return s?.approved ? 'معتمد' : 'بانتظار الاعتماد';
+}
+function checkPendingSessionsNotice(){
+  if(!currentUser || !isAdmin())return;
+  const pendingAll=(sessions||[]).filter(s=>!s.approved && s.userName);
+  const notice=document.getElementById('pendingAdminNotice');
+  if(notice && pendingAll.length){
+    const first=pendingAll[0];
+    notice.innerHTML=`🔔 يوجد جرد جديد من المستخدم <b>${esc(first.userName||'-')}</b> - <b>جرد رقم ${esc(first.number)}</b> بانتظار اعتماد المدير.`;
+    notice.classList.add('show');
+  }else if(notice){notice.classList.remove('show'); notice.innerHTML='';}
+  const pending=pendingAll.filter(s=>!seenPendingSessionIds.includes(s.id));
+  if(!pending.length)return;
+  const first=pending[0];
+  seenPendingSessionIds.push(first.id);
+  localStorage.setItem('sanabel_seen_pending_sessions',JSON.stringify(seenPendingSessionIds));
+  appNotice('يوجد جرد جديد',`يوجد <b>جرد رقم ${esc(first.number)}</b> من المستخدم <b>${esc(first.userName||'-')}</b> بانتظار اعتماد المدير.`);
+}
+async function approveSelectedSession(){
+  if(!isAdmin()){await appNotice('صلاحية المدير فقط','اعتماد الجرد خاص بالمدير.');return;}
+  const s=getSelectedSession();
+  if(!s){await appNotice('تنبيه','اختر جرد مغلق أولاً.');return;}
+  const ok=await appConfirm('اعتماد الجرد',`هل تريد اعتماد جرد رقم <b>${esc(s.number)}</b> من المستخدم <b>${esc(s.userName||'-')}</b>؟`,'اعتماد','إلغاء');
+  if(!ok)return;
+  const idx=sessions.findIndex(x=>x.id===s.id);
+  if(idx>=0){
+    sessions[idx].approved=true;
+    sessions[idx].approvedBy=currentUser||'-';
+    sessions[idx].approvedAt=nowText();
+    saveAll();
+    syncInventoryCloud();
+    renderSessionsList();
+    const sel=document.getElementById('sessionSelect'); if(sel) sel.value=s.id;
+    renderSessionDetails();
+    await appNotice('تم الاعتماد',`تم اعتماد جرد رقم <b>${esc(s.number)}</b>.`);
+  }
+}
+
+async function exportSelectedSessionPDF(){
+  const s=getSelectedSession();
+  if(!s){await appNotice('تنبيه','اختر جرد مغلق أولاً.');return;}
+  const area=document.getElementById('sessionPrintArea');
+  if(!area){window.print();return;}
+  const records=s.records||[];
+  const st=sessionStats(records);
+  const duration=computeSessionDuration(s);
+  const rows=records.map((r,i)=>`<tr>
+      <td>${i+1}</td>
+      <td>${esc(normalizeDateText(r.datetime))}</td>
+      <td>${esc(userNameOf(r))}</td>
+      <td class="barcode">${esc(r.barcode)}</td>
+      <td class="itemName">${esc(r.name)}</td>
+      <td>${num(r.systemQty)}</td>
+      <td>${num(r.actualQty)}</td>
+      <td>${diffHtml(r.diff)}</td>
+      <td>${esc(r.unit)}</td>
+      <td>${esc(r.notes||'')}</td>
+    </tr>`).join('');
+  area.innerHTML=`<h1>تقرير جرد أسواق سنابل المع</h1>
+    <div class="printKpiGrid">
+      <div class="printKpi"><span class="ico">📦</span><span>عدد الأصناف المجردة</span><b>${st.total}</b><small>صنف</small></div>
+      <div class="printKpi"><span class="ico">🔴</span><span>الأصناف بالسالب</span><b class="diffNeg">${st.negCount}</b><small>إجمالي النقص: ${num(st.negTotal)}</small></div>
+      <div class="printKpi"><span class="ico">🟢</span><span>الأصناف بالزيادة</span><b class="diffPos">${st.posCount}</b><small>إجمالي الزيادة: ${num(st.posTotal)}</small></div>
+      <div class="printKpi"><span class="ico">✅</span><span>الأصناف المطابقة</span><b>${st.zeroCount}</b><small>صنف</small></div>
+      <div class="printKpi"><span class="ico">⏱️</span><span>مدة الجرد</span><b>${duration}</b><small>ساعة:دقيقة:ثانية</small></div>
+    </div>
+    <div class="printMeta">
+      <div>رقم الجرد: ${esc(s.number)}</div><div>اسم الجارد: ${esc(s.userName||'-')}</div><div>بداية الجرد: ${esc(s.startedAt||records[0]?.datetime||'-')}</div><div>تاريخ الإغلاق: ${esc(s.datetime)}</div>
+      <div>عدد الأصناف: ${esc(s.count)}</div><div>إجمالي الفرق: ${diffHtml(s.totalDiff)}</div><div>حالة الاعتماد: ${sessionStatusText(s)}</div><div>اعتمد بواسطة: ${esc(s.approvedBy||'-')}</div>
+      <div>تاريخ الطباعة: ${esc(nowText())}</div><div>مدة الجرد: ${esc(duration)}</div><div>الأصناف بالسالب: ${st.negCount}</div><div>الأصناف بالزيادة: ${st.posCount}</div>
+    </div>
+    <table class="printTable">
+      <thead><tr>
+        <th style="width:4%">م</th><th style="width:12%">التاريخ والوقت</th><th style="width:9%">الجارد</th><th style="width:13%">الباركود</th><th style="width:26%">الصنف</th>
+        <th style="width:8%">كمية النظام</th><th style="width:8%">الكمية الفعلية</th><th style="width:6%">الفرق</th><th style="width:6%">الوحدة</th><th style="width:8%">ملاحظات</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <div class="printFoot">تطبيق جرد أسواق سنابل المع</div>`;
+  document.body.classList.add('printSessionOnly');
+  setTimeout(()=>{window.print(); setTimeout(()=>document.body.classList.remove('printSessionOnly'),700);},150);
+}
+
+async function exportSelectedSessionExcel(){
+  const s=getSelectedSession();
+  if(!s){await appNotice('تنبيه','اختر جرد مغلق أولاً.');return;}
+  const ws=XLSX.utils.json_to_sheet(sessionRowsForExport(s));
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,ws,`جرد رقم ${s.number}`);
+  XLSX.writeFile(wb,`جرد_رقم_${s.number}_سنابل.xlsx`);
+}
+async function exportSelectedSessionCSV(){
+  const s=getSelectedSession();
+  if(!s){await appNotice('تنبيه','اختر جرد مغلق أولاً.');return;}
+  const rows=[['التاريخ والوقت','الجارد','مصدر الملف','الباركود','اسم الصنف','كمية النظام','الكمية الفعلية','الفرق','الوحدة','التكلفة','إجمالي التكلفة','فرق التكلفة','ملاحظات'],...(s.records||[]).map(r=>[r.datetime,userNameOf(r),r.source||'',r.barcode,r.name,r.systemQty,r.actualQty,r.diff,r.unit,r.cost||0,recordCostTotal(r),recordDiffCost(r),r.notes])];
+  const csv='\ufeff'+rows.map(r=>r.map(v=>'"'+String(v??'').replaceAll('"','""')+'"').join(',')).join('\n');
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));
+  a.download=`جرد_رقم_${s.number}_سنابل.csv`;
+  a.click();
+}
+function exportSmartCSVForRecords(records, fileName){
+  const rows=[['Code','Quantity','Variant']];
+  let count=0;
+  (records||[]).forEach(r=>{
+    const diff=Number(r.diff||0);
+    if(diff===0)return;
+    const code=String(r.barcode||'').trim();
+    if(!code)return;
+    rows.push([code,diff,'']);
+    count++;
+  });
+  if(count===0){
+    alert('لا يوجد أصناف فيها فرق جرد لتصديرها إلى سمارت.');
+    return;
+  }
+  const csv='\ufeff'+rows.map(r=>r.map(v=>'"'+String(v??'').replaceAll('"','""')+'"').join(',')).join('\n');
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));
+  a.download=fileName;
+  a.click();
+}
+async function exportSelectedSessionSmartCSV(){
+  const s=getSelectedSession();
+  if(!s){await appNotice('تنبيه','اختر جرد مغلق أولاً.');return;}
+  exportSmartCSVForRecords(s.records,`smart_inventory_adjustment_جرد_${s.number}.csv`);
+}
+async function deleteSelectedSession(){
+  if(!isAdmin()){await appNotice('صلاحية المدير فقط','حذف الجرد المغلق خاص بالمدير.');return;}
+  const s=getSelectedSession();
+  if(!s){await appNotice('تنبيه','اختر جرد مغلق أولاً.');return;}
+  if(!await appConfirm('حذف الجرد',`حذف جرد رقم ${s.number}؟`,'حذف','إلغاء'))return;
+  sessions=sessions.filter(x=>x.id!==s.id);
+  saveAll();
+  syncInventoryCloud();
+  renderSessionsList();
+  renderSessionDetails();
+}
+
+function exportInventoryExcel(){const data=inventory.map(r=>({'التاريخ والوقت':r.datetime,'الجارد':userNameOf(r),'مصدر الملف':r.source||'','الباركود':r.barcode,'اسم الصنف':r.name,'كمية النظام':r.systemQty,'الكمية الفعلية':r.actualQty,'الفرق':r.diff,'الوحدة':r.unit,'التكلفة':r.cost||0,'إجمالي التكلفة':recordCostTotal(r),'فرق التكلفة':recordDiffCost(r),'ملاحظات':r.notes})); const ws=XLSX.utils.json_to_sheet(data); const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'تقرير الجرد'); XLSX.writeFile(wb,'تقرير_جرد_سنابل_المع.xlsx');}
+
+function exportSmartCSV(){ exportSmartCSVForRecords(inventory,'smart_inventory_adjustment.csv'); }
+function exportInventoryCSV(){const rows=[['التاريخ والوقت','الجارد','مصدر الملف','الباركود','اسم الصنف','كمية النظام','الكمية الفعلية','الفرق','الوحدة','التكلفة','إجمالي التكلفة','فرق التكلفة','ملاحظات'],...inventory.map(r=>[r.datetime,userNameOf(r),r.source||'',r.barcode,r.name,r.systemQty,r.actualQty,r.diff,r.unit,r.cost||0,recordCostTotal(r),recordDiffCost(r),r.notes])]; const csv='\ufeff'+rows.map(r=>r.map(v=>'"'+String(v??'').replaceAll('"','""')+'"').join(',')).join('\n'); const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'})); a.download='تقرير_جرد_سنابل_المع.csv'; a.click();}
+function clearItems(){if(confirm('مسح جميع الأصناف المستوردة والبدء من جديد؟')){itemsMain=[];itemsOther=[];items=[];rebuildItems();saveAll();if(cloudReady&&db){db.ref('sanabelInventory').update({items:[],itemsMain:[],itemsOther:[]});}renderItemsTable();updateKpis();const msg=document.getElementById('importMsg'); if(msg) msg.innerHTML='<div class="ok">تم مسح الأصناف. يمكنك الآن استيراد ملف جديد.</div>';}}
+function clearInventory(){if(confirm('مسح تقرير الجرد بالكامل؟')){inventory=[];saveAll();cloudSet('inventory',inventory);renderInventoryTable();}}
+function esc(v){return String(v??'').replace(/[&<>"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m]))} function num(v){return Number(v||0).toLocaleString('en-US',{maximumFractionDigits:3})}
+document.addEventListener('DOMContentLoaded', function(){
+  renderUsers();renderUsersManage();renderItemsTable();renderInventoryTable();updateKpis();renderSessionsList();renderSessionDetails();applyRolePermissions();requireLogin();applyLanguage();initCloud();
+  setTimeout(()=>document.getElementById('pinInput')?.focus(),250);
+});
+</script>
+
+<div id="appModalOverlay" class="appModalOverlay noPrint">
+  <div class="appModal">
+    <h3 id="appModalTitle">تأكيد</h3>
+    <p id="appModalMessage"></p>
+    <div class="modalActions">
+      <button id="appModalYes" class="btnGreen" type="button">نعم</button>
+      <button id="appModalNo" class="btn2" type="button">إلغاء</button>
+    </div>
+  </div>
+</div>
+
+
+<div id="loginOverlay" class="loginOverlay noPrint">
+  <div class="loginCard">
+    <div class="bigLogo">🌾</div>
+    <h2>دخول الجرد</h2>
+    <p class="small">أدخل الرقم السري الخاص بك، وسيتم تسجيل اسمك تلقائيًا في الجرد والتقارير.</p>
+    <input id="pinInput" class="pinInput" type="password" inputmode="numeric" maxlength="8" placeholder="••••" onkeydown="if(event.key==='Enter') loginByPin()">
+    <div class="toolbar" style="justify-content:center"><button class="btnGreen" onclick="loginByPin()" class="tr" data-key="login">دخول</button></div>
+    <div id="loginMsg"></div>
+    <div class="ok">الرقم الافتراضي للمدير أول مرة: 1234</div>
+  </div>
+</div>
+
+
+<div id="sessionPrintArea" class="sessionPrintArea"></div>
+
+
+
+<script>
+document.addEventListener('DOMContentLoaded', function(){
+  setTimeout(function(){
+    var pin=document.getElementById('pinInput');
+    if(pin){
+      pin.onkeydown=function(event){
+        if(event.key==='Enter'){
+          event.preventDefault();
+          loginByPin();
+        }
+      };
+    }
+  },300);
+});
+</script>
+
+<script>
+function renderItemsTable(){
+  const body=document.getElementById('itemsTbody');
+  if(!body) return;
+  const q=String(document.getElementById('searchItems')?.value||'').trim().toLowerCase();
+
+  function val(it, keys){
+    for(const k of keys){
+      if(it && it[k]!==undefined && it[k]!==null && String(it[k]).trim()!=='') return it[k];
+    }
+    return '';
+  }
+
+  const list=(Array.isArray(items)?items:[]).filter(it=>{
+    const barcode=String(val(it,['barcode','باركود','الباركود'])||'').toLowerCase();
+    const name=String(val(it,['name','item','اسم الصنف','الصنف','الاسم'])||'').toLowerCase();
+    return !q || barcode.includes(q) || name.includes(q);
+  });
+
+  body.innerHTML=list.slice(0,5000).map(it=>{
+    const barcode=String(val(it,['barcode','باركود','الباركود'])||'').trim();
+    const name=String(val(it,['name','item','اسم الصنف','الصنف','الاسم'])||'').trim();
+    const qty=Number(val(it,['qty','quantity','كمية','الكمية'])||0);
+    const unit=String(val(it,['unit','وحدة','الوحدة'])||'').trim();
+    const cost=Number(val(it,['cost','تكلفة','التكلفة','سعر التكلفة'])||0);
+    return `<tr>
+      <td style="direction:ltr;text-align:center">${esc(barcode)}</td>
+      <td>${esc(name)}</td>
+      <td>${num(qty)}</td>
+      <td>${esc(unit)}</td>
+      <td>${num(cost)}</td>
+    </tr>`;
+  }).join('');
+}
+</script>
+
+
+
+
+<script>
+/* استيراد أعمدة ثابتة + صوت + فلاش */
+(function(){
+  function lines(id){
+    const el=document.getElementById(id);
+    return String(el?.value||'').split(/\r?\n/).map(x=>String(x).trim());
+  }
+  function cleanBarcode(v){
+    let s=String(v??'').trim().replace(/\s+/g,'');
+    if(/^[0-9]+\.0+$/.test(s)) s=s.replace(/\.0+$/,'');
+    return s;
+  }
+  function isBarcode(v){
+    const s=cleanBarcode(v);
+    return /^[0-9]{5,20}$/.test(s);
+  }
+  function toNumber(v){
+    let s=String(v??'').trim();
+    s=s.replace(/[٠-٩]/g, d=>'٠١٢٣٤٥٦٧٨٩'.indexOf(d));
+    s=s.replace(/[۰-۹]/g, d=>'۰۱۲۳۴۵۶۷۸۹'.indexOf(d));
+    s=s.replace(/,/g,'').replace(/[^\d.\-]/g,'');
+    const n=Number(s);
+    return isNaN(n)?0:n;
+  }
+  window.clearColumnBoxes=function(){
+    ['colBarcode','colName','colCost','colQty','colUnit'].forEach(id=>{
+      const el=document.getElementById(id);
+      if(el) el.value='';
+    });
+  };
+  window.importColumnsData=function(){
+    try{
+      const barcodes=lines('colBarcode');
+      const names=lines('colName');
+      const costs=lines('colCost');
+      const qtys=lines('colQty');
+      const units=lines('colUnit');
+
+      if(!barcodes.some(x=>x.trim()) || !names.some(x=>x.trim())){
+        appNotice('تنبيه','الصق عمود الباركود وعمود اسم الصنف أولاً.');
+        return;
+      }
+
+      const max=Math.max(barcodes.length,names.length);
+      if(!Array.isArray(items)) items=[];
+
+      const by=new Map();
+      items.forEach((it,i)=>{
+        const code=cleanBarcode(it.barcode);
+        if(code) by.set(code,i);
+      });
+
+      let added=0, updated=0, skipped=0;
+
+      for(let i=0;i<max;i++){
+        const barcode=cleanBarcode(barcodes[i]||'');
+        const name=String(names[i]||'').trim();
+
+        if(!barcode || !name || !isBarcode(barcode) || barcode.includes('باركود') || name.includes('الصنف')){
+          skipped++;
+          continue;
+        }
+
+        const obj={
+          barcode,
+          name,
+          item:name,
+          cost:toNumber(costs[i]||0),
+          qty:toNumber(qtys[i]||0),
+          unit:String(units[i]||'').trim()
+        };
+
+        if(by.has(barcode)){
+          const idx=by.get(barcode);
+          items[idx]={...items[idx],...obj};
+          updated++;
+        }else{
+          items.push(obj);
+          by.set(barcode,items.length-1);
+          added++;
+        }
+      }
+
+      itemsMain=items.map(x=>({...x}));
+      itemsOther=[];
+      safeSet('sanabel_items',JSON.stringify(items));
+      safeSet('sanabel_items_main',JSON.stringify(itemsMain));
+      safeSet('sanabel_items_other',JSON.stringify(itemsOther));
+
+      try{saveAll();}catch(e){}
+      try{syncItemsCloud();}catch(e){}
+      try{renderItemsTable();updateKpis();}catch(e){}
+
+      clearColumnBoxes();
+
+      const msg=document.getElementById('importMsg');
+      if(msg) msg.innerHTML=`<div class="ok">تم الاستيراد بنجاح<br>جديد: <b>${added}</b> — تحديث: <b>${updated}</b> — تجاهل: <b>${skipped}</b><br>إجمالي الأصناف: <b>${items.length}</b></div>`;
+    }catch(err){
+      console.error(err);
+      appNotice('خطأ','حدث خطأ أثناء استيراد الأعمدة: '+err.message);
+    }
+  };
+
+  window.renderItemsTable=function(){
+    const body=document.getElementById('itemsTbody');
+    if(!body) return;
+    const q=String(document.getElementById('searchItems')?.value||'').trim().toLowerCase();
+    const list=(Array.isArray(items)?items:[]).filter(it=>{
+      const barcode=String(it.barcode||'').toLowerCase();
+      const name=String(it.name||it.item||'').toLowerCase();
+      return !q || barcode.includes(q) || name.includes(q);
+    });
+    body.innerHTML=list.slice(0,5000).map(it=>{
+      const barcode=String(it.barcode||'').trim();
+      const name=String(it.name||it.item||'').trim();
+      const qty=Number(it.qty||0);
+      const unit=String(it.unit||'').trim();
+      const cost=Number(it.cost||0);
+      return `<tr>
+        <td style="direction:ltr;text-align:center">${esc(barcode)}</td>
+        <td>${esc(name)}</td>
+        <td>${num(qty)}</td>
+        <td>${esc(unit)}</td>
+        <td>${num(cost)}</td>
+      </tr>`;
+    }).join('');
+  };
+
+  window.playScanSoundStrong=function(){
+    try{
+      const AudioCtx=window.AudioContext||window.webkitAudioContext;
+      const ctx=new AudioCtx();
+      if(ctx.state==='suspended') ctx.resume();
+      const osc=ctx.createOscillator();
+      const gain=ctx.createGain();
+      osc.frequency.value=1200;
+      gain.gain.setValueAtTime(0.001,ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.5,ctx.currentTime+0.02);
+      gain.gain.exponentialRampToValueAtTime(0.001,ctx.currentTime+0.22);
+      osc.connect(gain); gain.connect(ctx.destination);
+      osc.start(); osc.stop(ctx.currentTime+0.25);
+    }catch(e){}
+    try{navigator.vibrate&&navigator.vibrate(90)}catch(e){}
+  };
+
+  const oldFindItem=window.findItem;
+  window.findItem=function(code){
+    const res=oldFindItem?oldFindItem.apply(this,arguments):undefined;
+    setTimeout(function(){
+      try{
+        const box=document.getElementById('itemBox');
+        const txt=box?box.innerText:'';
+        if(txt && !txt.includes('غير موجود') && !txt.includes('لم يتم العثور')) window.playScanSoundStrong();
+      }catch(e){}
+    },100);
+    return res;
+  };
+
+  window.torchOn=false;
+  window.toggleTorch=function(){
+    try{
+      const stream=window.nativeStream || (document.getElementById('nativeVideo')?.srcObject);
+      const track=stream && stream.getVideoTracks ? stream.getVideoTracks()[0] : null;
+      if(!track){appNotice('تنبيه','شغّل الكاميرا أولاً ثم جرّب الفلاش.');return;}
+      const caps=track.getCapabilities ? track.getCapabilities() : {};
+      if(!caps.torch){appNotice('تنبيه','هذا الجهاز أو المتصفح لا يدعم تشغيل الفلاش من الصفحة.');return;}
+      window.torchOn=!window.torchOn;
+      track.applyConstraints({advanced:[{torch:window.torchOn}]});
+    }catch(e){
+      appNotice('تنبيه','تعذر تشغيل الفلاش من هذا المتصفح.');
+    }
+  };
+})();
+</script>
+
+
+<script>
+function clearLocalLoginProblem(){
+  try{
+    ['sanabel_users','sanabel_current_user','sanabel_items','sanabel_items_main','sanabel_items_other','sanabel_inventory','sanabel_sessions','sanabel_import_history'].forEach(k=>localStorage.removeItem(k));
+  }catch(e){}
+  alert('تم تنظيف بيانات المتصفح. أعد تحميل الصفحة ثم ادخل بالرقم 1234.');
+  location.reload();
+}
+</script>
+
+
+
+<script>
+/* إصلاح نهائي للرفوف و QR وربط الجرد بالرف - بدون طباعة أكواد في الصفحة */
+(function(){
+  const SHELVES_KEY='sanabel_shelves';
+  const CURRENT_SHELF_KEY='sanabel_current_shelf';
+
+  function esc2(v){
+    return String(v == null ? '' : v).replace(/[&<>"']/g,function(c){
+      return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+    });
+  }
+  function num2(v){
+    try{ if(typeof num==='function') return num(v); }catch(e){}
+    const n=Number(v||0);
+    return isFinite(n)?n.toLocaleString('en-US'): '0';
+  }
+  function getAppUrl(){
+    try{
+      return window.location.origin + window.location.pathname;
+    }catch(e){
+      return String(window.location.href||'').split('?')[0].split('#')[0];
+    }
+  }
+  function normalizeShelfCode(v){
+    v=String(v||'').trim().toUpperCase();
+    if(!v) return '';
+    if(/^SHELF:/i.test(v)) v=v.split(':').slice(1).join(':').trim().toUpperCase();
+    return v.replace(/\s+/g,'');
+  }
+  function getShelfFromAnyText(raw){
+    const txt=String(raw||'').trim();
+    if(!txt) return '';
+    if(/^SHELF:/i.test(txt)) return normalizeShelfCode(txt);
+    try{
+      const u=new URL(txt, window.location.href);
+      const s=u.searchParams.get('shelf') || u.searchParams.get('رف') || '';
+      if(s) return normalizeShelfCode(s);
+    }catch(e){}
+    if(/^[A-Z]{1,4}-\d{1,6}$/i.test(txt)) return normalizeShelfCode(txt);
+    return '';
+  }
+  function shelfCode(prefix,num){
+    let p=String(prefix||'A').trim().toUpperCase();
+    p=p.replace(/[^A-Z0-9]/g,'');
+    if(!p || p==='رف') p='A';
+    return p+'-'+String(num).padStart(3,'0');
+  }
+
+  window.loadShelves=function(){
+    try{ window.shelves=JSON.parse(localStorage.getItem(SHELVES_KEY)||'[]'); }catch(e){ window.shelves=[]; }
+    if(!Array.isArray(window.shelves)) window.shelves=[];
+    window.currentShelf=localStorage.getItem(CURRENT_SHELF_KEY)||'';
+    return window.shelves;
+  };
+
+  window.saveShelves=function(){
+    localStorage.setItem(SHELVES_KEY, JSON.stringify(window.shelves||[]));
+    try{ if(typeof cloudSet==='function') cloudSet('shelves', window.shelves||[]); }catch(e){}
+  };
+
+  window.qrDataForShelf=function(code){
+    return getAppUrl() + '?shelf=' + encodeURIComponent(normalizeShelfCode(code));
+  };
+
+  window.qrUrl=function(data, size){
+    size=size||180;
+    return 'https://api.qrserver.com/v1/create-qr-code/?size='+size+'x'+size+'&data='+encodeURIComponent(data);
+  };
+
+  window.generateShelves=function(){
+    loadShelves();
+    const start=parseInt((document.getElementById('shelfStart')||{}).value || '1',10)||1;
+    const count=parseInt((document.getElementById('shelfCount')||{}).value || '10',10)||10;
+    const prefix=(document.getElementById('shelfPrefix')||{}).value || 'A';
+    let added=0;
+    for(let i=0;i<count;i++){
+      const code=shelfCode(prefix,start+i);
+      if(!window.shelves.some(s=>String(s.code||'').toUpperCase()===code)){
+        window.shelves.push({code:code,label:'رف '+code,createdAt:new Date().toISOString()});
+        added++;
+      }
+    }
+    saveShelves();
+    renderShelves();
+    const msg=document.getElementById('shelfMsg');
+    if(msg) msg.innerHTML='<div class="ok">تم إنشاء '+added+' رف بنجاح، وظهر QR لكل رف.</div>';
+  };
+
+  window.setCurrentShelf=function(code){
+    const shelf=normalizeShelfCode(code);
+    if(!shelf) return false;
+    localStorage.setItem(CURRENT_SHELF_KEY,shelf);
+    window.currentShelf=shelf;
+    try{ if(typeof ensureInventoryStarted==='function') ensureInventoryStarted(); }catch(e){}
+    renderShelves();
+    const msg=document.getElementById('scanMsg');
+    if(msg) msg.innerHTML='<div class="ok">تم ربط الجرد الحالي بالرف: <b style="direction:ltr;display:inline-block">'+esc2(shelf)+'</b></div>';
+    try{ if(typeof appNotice==='function') appNotice('تم اختيار الرف','تم ربط الجرد الحالي بالرف: <b style="direction:ltr;display:inline-block">'+esc2(shelf)+'</b>'); }catch(e){}
+    try{ if(typeof showPage==='function') showPage('scan'); }catch(e){}
+    return true;
+  };
+
+  window.clearShelves=function(){
+    if(!confirm('هل تريد مسح جميع الرفوف؟')) return;
+    window.shelves=[];
+    localStorage.removeItem(SHELVES_KEY);
+    localStorage.removeItem(CURRENT_SHELF_KEY);
+    saveShelves();
+    renderShelves();
+  };
+
+  window.renderShelves=function(){
+    loadShelves();
+    const body=document.getElementById('shelvesTbody');
+    const label=document.getElementById('currentShelfLabel');
+    if(label) label.textContent=window.currentShelf || 'لم يتم اختيار رف';
+    if(!body) return;
+    body.innerHTML=(window.shelves||[]).map(function(s){
+      const code=normalizeShelfCode(s.code);
+      const data=window.qrDataForShelf(code);
+      const active=window.currentShelf===code ? ' <span class="userBadge">محدد</span>' : '';
+      return '<tr>'+
+        '<td style="direction:ltr;text-align:center">'+esc2(code)+active+'</td>'+
+        '<td style="text-align:center"><img alt="QR '+esc2(code)+'" src="'+window.qrUrl(data,120)+'" style="width:92px;height:92px;background:#fff;padding:4px;border-radius:10px"><br><small style="direction:ltr;display:block;word-break:break-all">'+esc2(data)+'</small></td>'+
+        '<td><div class="actions">'+
+          '<button class="btnGreen" onclick="setCurrentShelf(\''+code.replace(/'/g,"\\'")+'\')">فتح الجرد على هذا الرف</button>'+
+          '<button class="btnBlue" onclick="printOneShelfQR(\''+code.replace(/'/g,"\\'")+'\')">طباعة QR</button>'+
+        '</div></td>'+
+      '</tr>';
+    }).join('');
+  };
+
+  function writePrintWindow(title, inner){
+    const w=window.open('','_blank');
+    if(!w){ alert('المتصفح منع نافذة الطباعة. اسمح بالنوافذ المنبثقة.'); return; }
+    const doc='<!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="UTF-8"><title>'+esc2(title)+'</title>'+
+      '<style>body{font-family:Tahoma,Arial;margin:10mm;color:#000}.qrGrid{display:grid;grid-template-columns:repeat(2,1fr);gap:8mm}.qrCard{border:2px solid #111;border-radius:14px;text-align:center;padding:8mm;break-inside:avoid;page-break-inside:avoid}.qrCard h1{font-size:30px;margin:0 0 5mm}.qrCard img{width:58mm;height:58mm}.qrCard p{direction:ltr;font-size:24px;font-weight:bold;margin:4mm 0 1mm}.qrCard small{direction:ltr;display:block;font-size:9px;word-break:break-all;color:#333}@media print{.qrCard{page-break-inside:avoid}}</style>'+
+      '</head><body>'+inner+'
+<script>
+/* إصلاح نهائي لقبول الدخول بعد فتح التطبيق من QR الرف */
+(function(){
+  function getPinValue(){
+    var ids=['loginPin','pinInput','pin','userPin','loginPassword','password'];
+    for(var i=0;i<ids.length;i++){
+      var el=document.getElementById(ids[i]);
+      if(el && String(el.value||'').trim()) return String(el.value||'').trim();
+    }
+    var inputs=document.querySelectorAll('#loginOverlay input, .loginOverlay input, input[type="password"], input[inputmode="numeric"]');
+    for(var j=0;j<inputs.length;j++){
+      if(String(inputs[j].value||'').trim()) return String(inputs[j].value||'').trim();
+    }
+    return '';
+  }
+  window.loginUser = function(){
+    try{
+      if(typeof normalizeUsers === 'function') normalizeUsers();
+      if(!Array.isArray(window.users)) window.users = [];
+      var pin=getPinValue();
+      var u=(window.users||[]).find(function(x){return String((x&&x.pin)||'').trim()===pin;});
+      if(!u && pin==='1234'){
+        u={name:'ابوقصي',pin:'1234',role:'مدير'};
+        window.users.unshift(u);
+        try{localStorage.setItem('sanabel_users',JSON.stringify(window.users));}catch(e){}
+      }
+      if(!u){
+        if(typeof appNotice==='function') appNotice('تنبيه','الرقم السري غير صحيح');
+        else alert('الرقم السري غير صحيح');
+        return false;
+      }
+      window.currentUser = u.name || 'ابوقصي';
+      try{localStorage.setItem('sanabel_active_user', window.currentUser);}catch(e){}
+      document.body.classList.remove('login-first');
+      var over=document.getElementById('loginOverlay');
+      if(over){over.classList.remove('show'); over.style.display='none';}
+      var nameEl=document.getElementById('activeUserName');
+      if(nameEl) nameEl.textContent=window.currentUser;
+      if(typeof applyRolePermissions==='function') applyRolePermissions();
+      if(typeof renderUsers==='function') renderUsers();
+      if(typeof renderUsersManage==='function') renderUsersManage();
+      if(typeof updateCurrentShelfFromUrl==='function') updateCurrentShelfFromUrl();
+      if(typeof showPage==='function') showPage('scan'); else {
+        document.querySelectorAll('.page').forEach(function(p){p.classList.remove('active')});
+        var p=document.getElementById('page-scan')||document.getElementById('page-home');
+        if(p)p.classList.add('active');
+      }
+      return false;
+    }catch(err){
+      console.error(err);
+      alert('حدث خطأ في الدخول: '+err.message);
+      return false;
+    }
+  };
+  document.addEventListener('DOMContentLoaded',function(){
+    var form=document.querySelector('#loginOverlay form, .loginOverlay form');
+    if(form) form.onsubmit=function(e){e.preventDefault(); return window.loginUser();};
+    document.querySelectorAll('#loginOverlay input, .loginOverlay input').forEach(function(inp){
+      inp.addEventListener('keydown',function(e){
+        if(e.key==='Enter'){e.preventDefault(); window.loginUser();}
+      });
+    });
+  });
+})();
+</script>
+
+</body></html>';
+    w.document.open();
+    w.document.write(doc);
+    w.document.close();
+    setTimeout(function(){ try{ w.focus(); w.print(); }catch(e){} },700);
+  }
+
+  window.printOneShelfQR=function(code){
+    const shelf=normalizeShelfCode(code);
+    const data=window.qrDataForShelf(shelf);
+    const card='<div class="qrGrid"><div class="qrCard"><h1>رف '+esc2(shelf)+'</h1><img src="'+window.qrUrl(data,260)+'"><p>'+esc2(shelf)+'</p><small>'+esc2(data)+'</small></div></div>';
+    writePrintWindow('QR '+shelf, card);
+  };
+
+  window.printShelvesQR=function(){
+    loadShelves();
+    if(!window.shelves.length){ alert('أنشئ الرفوف أولاً'); return; }
+    const cards='<div class="qrGrid">'+window.shelves.map(function(s){
+      const code=normalizeShelfCode(s.code);
+      const data=window.qrDataForShelf(code);
+      return '<div class="qrCard"><h1>رف '+esc2(code)+'</h1><img src="'+window.qrUrl(data,260)+'"><p>'+esc2(code)+'</p><small>'+esc2(data)+'</small></div>';
+    }).join('')+'</div>';
+    writePrintWindow('QR الرفوف', cards);
+  };
+
+  window.handleShelfQrText=function(raw){
+    const shelf=getShelfFromAnyText(raw);
+    if(!shelf) return false;
+    setCurrentShelf(shelf);
+    return true;
+  };
+
+  window.startShelfQrScanner=async function(){
+    try{
+      if(typeof stopScanner==='function') stopScanner();
+      const video=document.getElementById('nativeVideo');
+      const quagga=document.getElementById('quaggaReader');
+      const shell=document.getElementById('scannerShell');
+      if(!video){ alert('لم يتم العثور على شاشة الكاميرا'); return; }
+      if(quagga) quagga.classList.add('hide');
+      video.classList.remove('hide');
+      if(shell) shell.classList.add('active');
+      const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'}},audio:false});
+      window.nativeStream=stream;
+      video.srcObject=stream;
+      await video.play();
+      let detector=null;
+      try{ if('BarcodeDetector' in window) detector=new BarcodeDetector({formats:['qr_code']}); }catch(e){}
+      const canvas=document.createElement('canvas');
+      const ctx=canvas.getContext('2d',{willReadFrequently:true});
+      window.__shelfQrActive=true;
+      async function loop(){
+        if(!window.__shelfQrActive) return;
+        try{
+          if(video.readyState>=2){
+            if(detector){
+              try{
+                const arr=await detector.detect(video);
+                if(arr&&arr.length&&handleShelfQrText(arr[0].rawValue||arr[0].rawData||'')){
+                  window.__shelfQrActive=false;
+                  return;
+                }
+              }catch(e){}
+            }
+            if(window.jsQR && video.videoWidth && video.videoHeight){
+              canvas.width=video.videoWidth; canvas.height=video.videoHeight;
+              ctx.drawImage(video,0,0,canvas.width,canvas.height);
+              const img=ctx.getImageData(0,0,canvas.width,canvas.height);
+              const qr=window.jsQR(img.data,img.width,img.height,{inversionAttempts:'attemptBoth'});
+              if(qr&&qr.data&&handleShelfQrText(qr.data)){
+                window.__shelfQrActive=false;
+                return;
+              }
+            }
+          }
+        }catch(e){}
+        requestAnimationFrame(loop);
+      }
+      loop();
+      const msg=document.getElementById('scanMsg');
+      if(msg) msg.innerHTML='<div class="ok">وجه الكاميرا على QR الرف، وبعد القراءة سيتم ربط الجرد بهذا الرف.</div>';
+    }catch(err){
+      console.error(err);
+      alert('تعذر تشغيل كاميرا QR. تأكد من السماح للكاميرا واستخدم Chrome أو Edge.');
+    }
+  };
+
+  const oldFind=window.findItem;
+  window.findItem=function(code){
+    if(handleShelfQrText(code)) return;
+    return oldFind ? oldFind.apply(this,arguments) : undefined;
+  };
+
+  const oldSave=window.saveCount;
+  window.saveCount=function(ev){
+    window.currentShelf=localStorage.getItem(CURRENT_SHELF_KEY)||window.currentShelf||'';
+    return oldSave ? oldSave.apply(this,arguments) : undefined;
+  };
+
+  const oldLogin=window.loginByPin;
+  if(oldLogin){
+    window.loginByPin=function(){
+      const r=oldLogin.apply(this,arguments);
+      setTimeout(function(){
+        const shelf=getShelfFromAnyText(window.location.href) || localStorage.getItem(CURRENT_SHELF_KEY) || '';
+        if(shelf){
+          localStorage.setItem(CURRENT_SHELF_KEY,shelf);
+          window.currentShelf=shelf;
+          try{ showPage('scan'); }catch(e){}
+          const msg=document.getElementById('scanMsg');
+          if(msg) msg.innerHTML='<div class="ok">الجرد الحالي مربوط بالرف: <b style="direction:ltr;display:inline-block">'+esc2(shelf)+'</b></div>';
+        }
+      },300);
+      return r;
+    };
+  }
+
+  function applyShelfFromUrl(){
+    const shelf=getShelfFromAnyText(window.location.href);
+    if(shelf){
+      localStorage.setItem(CURRENT_SHELF_KEY,shelf);
+      window.currentShelf=shelf;
+      const msg=document.getElementById('loginMsg');
+      if(msg) msg.innerHTML='<div class="ok">تم اختيار الرف <b style="direction:ltr;display:inline-block">'+esc2(shelf)+'</b> — أدخل الرقم السري للبدء بالجرد.</div>';
+    }
+  }
+
+  document.addEventListener('DOMContentLoaded', function(){
+    applyShelfFromUrl();
+    setTimeout(function(){ try{ renderShelves(); }catch(e){} },500);
+  });
+})();
+</script>
+</body>
+</html>
